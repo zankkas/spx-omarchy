@@ -1,0 +1,968 @@
+#!/usr/bin/env bash
+# spx-omarchy-install - install Omarchy (AArch64) on a Surface Pro X (SQ1/SQ2),
+# keeping the proven Surface kernel/DTB/GRUB boot path.
+#
+# RUNS IN A LIVE USB ENVIRONMENT as root (the experimental Omarchy USB's live
+# session, with the USB Wi-Fi dongle connected):
+#
+#   bash /path/to/spx-omarchy-install [--luks]   # dry run (default, no writes)
+#   bash /path/to/spx-omarchy-install --apply [--luks]
+#                                                # ERASES the target after typing
+#                                                #   ERASE <target>;
+#                                                # --luks encrypts root (LUKS2)
+#
+# Separate project from spx-install: this script never modifies the SanDisk
+# recovery stick, the 512 GB data drive, or the Omarchy USB itself. The
+# linux-surface packages and Surface firmware are read from the recovery kit
+# (SPXO_KIT or a kit/ sibling of this script).
+#
+# Sources:
+#   - Omarchy packages:  https://pkgs.omarchy.org/edge/aarch64 (unsigned DB)
+#   - Arch Linux ARM:    https://arm-mirror.omarchy.org/$arch/$repo (unsigned DB)
+#   - Surface kernel:    kit packages (linux-surface (see docs/ for the version this was validated with)), local file repo
+#
+# The generic linux-aarch64 kernel and Omarchy's Limine boot path are NOT used.
+set -u
+
+# ----------------------------------------------------------------- configuration
+HOSTNAME_=${SPXO_HOSTNAME:-surface-x}
+USERNAME_=${SPXO_USERNAME:-$(id -un 2>/dev/null || echo user)}
+TIMEZONE_=${SPXO_TIMEZONE:-Europe/Berlin}
+LOCALE_=${SPXO_LOCALE:-en_US.UTF-8}
+BT_ADDR_=${SPXO_BT_ADDR:-}
+SWAP_MB=4096
+ESP_MB=512
+LBOOT_MB=768   # unencrypted /boot when --luks (ESP holds only GRUB)
+CRYPTROOT=cryptroot
+NVME="${SPXO_TARGET_DISK:-/dev/nvme0n1}"
+TARGET=/target
+KIT="${SPXO_KIT:-}"
+OMARCHY_REPO='https://pkgs.omarchy.org/edge/$arch'
+ALARM_MIRROR='https://arm-mirror.omarchy.org/$arch/$repo'
+MODE="--dry-run"
+MODE="--dry-run"; LUKS=0
+[ "$#" -le 0 ] || MODE="$1"
+[ "$#" -le 2 ] || { echo "usage: $0 [--dry-run|--apply] [--luks]" >&2; exit 2; }
+case "${2:-}" in
+  "") ;;
+  --luks) LUKS=1 ;;
+  *) echo "usage: $0 [--dry-run|--apply] [--luks]" >&2; exit 2 ;;
+esac
+case "$MODE" in
+  --dry-run|--apply) ;;
+  *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
+esac
+if [ -n "${SPXO_TARGET_DISK:-}" ]; then
+  case "$NVME" in
+    /dev/loop*) ;;
+    *) echo "SPXO_TARGET_DISK overrides are restricted to disposable loop devices" >&2; exit 2 ;;
+  esac
+fi
+
+SELF=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+# The Surface kit (linux-surface packages + firmware) is read-only input:
+# SPXO_KIT, or a kit/ directory next to this script.
+if [ -z "$KIT" ]; then
+  for candidate in "$SELF/kit" "$(dirname "$SELF")/kit" "/run/usb/kit"; do
+    if [ -d "$candidate/packages" ] && [ -d "$(dirname "$candidate")/firmware" ]; then
+      KIT="$candidate"; break
+    fi
+  done
+fi
+FW=""
+[ -n "$KIT" ] && FW="$(dirname "$KIT")/firmware"
+PKG_LISTS="$KIT/omarchy-packages"
+if [ ! -d "$PKG_LISTS" ] && [ -d "$SELF/omarchy-packages" ]; then
+  PKG_LISTS="$SELF/omarchy-packages"
+fi
+OUT="$SELF/report-omarchy-install.txt"
+
+[ "$(id -u)" -eq 0 ] || { echo "run me as root"; exit 1; }
+
+say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+die()  { printf '\n!!! %s\n' "$*" >&2; echo "ABORTED - no further actions will run; earlier target changes may have occurred." >&2
+  # Leave no mounts behind: a leftover /target makes the next run fail with
+  # "Device or resource busy".
+  echo "!!! $*" >&2
+  echo "================ ABORTED - see the console above for the exact error ===================" >> "$OUT" 2>/dev/null || true
+  sleep 2  # let the tee flush the report tail before the stick gets pulled
+  if [ -d "$TARGET" ] && mountpoint -q "$TARGET" 2>/dev/null; then
+    echo "cleaning up: unmounting $TARGET" >&2
+    umount -R "$TARGET" 2>/dev/null || true
+  fi
+  exit 1; }
+fail_closed() { echo "FAIL $1" >&2; echo "================ CHECKS FAILED - DO NOT BOOT ASSUMING SUCCESS ===================" >&2; sleep 2; exit 1; }
+
+BOUND=0
+chroot_run() {
+  # Always use explicit bind mounts. arch-chroot mounts a FRESH devtmpfs on
+  # /dev, which carries /dev/dm-0 but NOT the /dev/mapper/<cryptroot> symlink
+  # (that is a udev artifact of the live env's own /dev) — grub-probe then
+  # dies with "failed to get canonical path of /dev/mapper/cryptroot" and
+  # grub-mkconfig aborts (found 2026-10-15 in the loop-device oracle).
+  # A wholesale bind of the live env's /dev keeps /dev/mapper visible.
+  for d in dev proc sys run; do
+    umount -l "$TARGET/$d" 2>/dev/null || true
+    mkdir -p "$TARGET/$d"
+    mount --bind "/$d" "$TARGET/$d" || die "chroot bind of /$d failed"
+    BOUND=1
+  done
+  [ -e "$TARGET/etc/resolv.conf" ] || : > "$TARGET/etc/resolv.conf"
+  chroot "$TARGET" "$@"
+}
+chroot_done() {
+  [ "$BOUND" = 1 ] || return 0
+  for d in dev proc sys run; do umount -l "$TARGET/$d" 2>/dev/null; done
+  BOUND=0
+}
+
+verify_manifest() {
+  local dir="$1" label="$2"
+  [ -f "$dir/MANIFEST.sha256" ] || die "$label manifest missing: $dir/MANIFEST.sha256"
+  (cd "$dir" && sha256sum -c MANIFEST.sha256) || die "$label manifest verification failed"
+}
+
+TOOLS_TMP=""
+cleanup_runtime_tools() {
+  [ -n "$TOOLS_TMP" ] || return 0
+  rm -f -- "$TOOLS_TMP/usr/bin/mkfs.fat" "$TOOLS_TMP/usr/bin/mkfs.vfat" \
+    "$TOOLS_TMP/usr/bin/pacstrap" "$TOOLS_TMP/usr/bin/arch-chroot" "$TOOLS_TMP/usr/bin/genfstab"
+  rmdir -- "$TOOLS_TMP/usr/bin" "$TOOLS_TMP/usr" "$TOOLS_TMP" 2>/dev/null || true
+}
+trap cleanup_runtime_tools EXIT
+
+# The live environment may lack pacstrap/arch-chroot/genfstab and mkfs.vfat.
+# Extract them from the kit's own packages into a temporary PATH prefix.
+bootstrap_runtime_tools() {
+  local dos_pkg="" install_pkg="" p
+  if command -v mkfs.vfat >/dev/null 2>&1 && command -v pacstrap >/dev/null 2>&1 \
+      && command -v arch-chroot >/dev/null 2>&1 && command -v genfstab >/dev/null 2>&1; then
+    return 0
+  fi
+  command -v tar >/dev/null 2>&1 || die "tar is required to load the bundled recovery helpers"
+  TOOLS_TMP=$(mktemp -d /run/spxo-tools.XXXXXX) || die "cannot create temporary helper directory"
+  if ! command -v mkfs.vfat >/dev/null 2>&1; then
+    for p in "$KIT"/packages/dosfstools-*.pkg.tar.*; do
+      [ -f "$p" ] || continue
+      case "$p" in *.sig) continue ;; esac
+      dos_pkg="$p"; break
+    done
+    [ -n "$dos_pkg" ] || die "bundled dosfstools package is missing from the kit"
+    tar -xf "$dos_pkg" -C "$TOOLS_TMP" usr/bin/mkfs.fat usr/bin/mkfs.vfat \
+      || die "cannot extract bundled dosfstools helpers"
+    [ -x "$TOOLS_TMP/usr/bin/mkfs.fat" ] || die "bundled mkfs.fat is missing"
+    [ -e "$TOOLS_TMP/usr/bin/mkfs.vfat" ] || ln -s mkfs.fat "$TOOLS_TMP/usr/bin/mkfs.vfat"
+  fi
+  if ! command -v pacstrap >/dev/null 2>&1 || ! command -v arch-chroot >/dev/null 2>&1 \
+      || ! command -v genfstab >/dev/null 2>&1; then
+    for p in "$KIT"/packages/arch-install-scripts-*.pkg.tar.*; do
+      [ -f "$p" ] || continue
+      case "$p" in *.sig) continue ;; esac
+      install_pkg="$p"; break
+    done
+    [ -n "$install_pkg" ] || die "bundled arch-install-scripts package is missing from the kit"
+    tar -xf "$install_pkg" -C "$TOOLS_TMP" usr/bin/pacstrap usr/bin/arch-chroot usr/bin/genfstab \
+      || die "cannot extract bundled Arch installation helpers"
+  fi
+  PATH="$TOOLS_TMP/usr/bin:$PATH"
+  export PATH
+}
+
+# Omarchy package composition: base + aarch64 + aarch64-qualcomm, comments and
+# blank lines stripped, exactly as omarchy-pkg-defaults composes them.
+read_pkg_list() {
+  [ "$#" -ge 1 ] || die "read_pkg_list needs at least one package list"
+  local f
+  for f in "$@"; do
+    [ -f "$f" ] || die "package list missing: $f"
+    grep -vE '^\s*(#|$)' "$f" | tr ' ' '\n' | grep -vE '^\s*(#|$)'
+  done
+}
+
+if [ "$MODE" = "--apply" ]; then
+  exec > >(tee "$OUT") 2>&1
+fi
+echo "==== spx-omarchy-install ($MODE) ===="
+date
+echo
+
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required for integrity checks"
+[ -n "$KIT" ] || die "no Surface kit found (set SPXO_KIT or place a kit/ next to this script)"
+[ -d "$FW" ] || die "no firmware/ found next to the kit ($FW) - refusing to build a system without it"
+[ -d "$PKG_LISTS" ] || die "no omarchy-packages/ lists found at $PKG_LISTS"
+verify_manifest "$KIT/packages" "package"
+verify_manifest "$FW" "firmware"
+bootstrap_runtime_tools
+
+# Offline mode: the kit carries a pre-resolved package cache (pkg/ + sync DBs)
+# with a sha256 manifest. When present, the install needs no network. The cache
+# may be a directory (kit/omarchy-pkgcache/) or a single tarball
+# (kit/omarchy-pkgcache.tar). The tar is NOT extracted at detection time:
+# /run and /tmp are small tmpfs in the live environment, and writing hundreds
+# of small files to the FAT stick is pathologically slow. It is extracted onto
+# the freshly formatted ext4 target in phase 6b instead.
+OFFLINE_DIR=""
+OFFLINE_TAR=""
+if [ -d "$KIT/omarchy-pkgcache/pkg" ] && [ -d "$KIT/omarchy-pkgcache/sync" ]; then
+  OFFLINE_DIR="$KIT/omarchy-pkgcache"
+  ( cd "$OFFLINE_DIR" && sha256sum -c MANIFEST.sha256 ) >/dev/null 2>&1 \
+    || die "omarchy-pkgcache manifest verification failed"
+elif [ -f "$KIT/omarchy-pkgcache.tar" ]; then
+  OFFLINE_TAR="$KIT/omarchy-pkgcache.tar"
+fi
+OFFLINE=0
+if [ -n "$OFFLINE_DIR" ] || [ -n "$OFFLINE_TAR" ]; then
+  OFFLINE=1
+fi
+
+# -------------------------------------------------------------------- dry run
+if [ "$MODE" = "--dry-run" ]; then
+  cat <<EOF
+spx-omarchy-install DRY RUN - no target disk, kit, or network files are modified.
+
+  target disk      $NVME  (WILL BE COMPLETELY ERASED on a real run)
+  ESP              ${ESP_MB} MiB fat32,   labelled EFI
+  boot             $([ "$LUKS" -eq 1 ] && echo "${LBOOT_MB} MiB ext4, labelled boot (unencrypted)")
+  root             $([ "$LUKS" -eq 1 ] && echo "LUKS2 (argon2id) as /dev/mapper/$CRYPTROOT, ext4 inside" || echo "remainder ext4,      labelled root")
+  hostname         $HOSTNAME_
+  user             $USERNAME_  (wheel + sudo)
+  timezone         $TIMEZONE_
+  locale           $LOCALE_
+  swapfile         ${SWAP_MB} MiB at /swapfile
+  bluetooth addr   $BT_ADDR_  (oneshot unit; never restart bluetoothd)
+
+  Surface kit      $KIT  (read-only: linux-surface packages + firmware)
+  package lists    $PKG_LISTS
+    omarchy-base                    $(read_pkg_list "$PKG_LISTS/omarchy-base.packages" | wc -l | tr -d ' ') packages
+    omarchy-aarch64                 $(read_pkg_list "$PKG_LISTS/omarchy-aarch64.packages" | wc -l | tr -d ' ') packages
+    omarchy-aarch64-qualcomm        $(read_pkg_list "$PKG_LISTS/omarchy-aarch64-qualcomm.packages" | wc -l | tr -d ' ') packages
+    core additions                  base, sudo, grub, linux-surface(+headers), networkmanager, bluez-utils, efibootmgr
+    composed set                    $(read_pkg_list "$PKG_LISTS/omarchy-base.packages" "$PKG_LISTS/omarchy-aarch64.packages" "$PKG_LISTS/omarchy-aarch64-qualcomm.packages" | sort | tr '\n' ' ')
+
+  repositories     [omarchy] $OMARCHY_REPO   (network, unsigned)
+                   [core]/[extra]/[alarm]/[aur] via $ALARM_MIRROR  (network, unsigned)
+                   [surface] file repo built from the kit's linux-surface packages
+  package source   $([ "$OFFLINE" -eq 1 ] && { [ -n "$OFFLINE_TAR" ] && echo "OFFLINE - omarchy-pkgcache.tar in the kit (extracted onto the target during install, no network needed)" || echo "OFFLINE - omarchy-pkgcache in the kit ($(ls "$OFFLINE_DIR/pkg" | wc -l | tr -d ' ') packages, no network needed)"; } || echo "ONLINE - fetched from the mirrors")
+  kernel/boot      linux-surface + sc8180x-surface-pro-x.dtb + GRUB arm64-efi
+                   (the generic Arm kernel and the Limine bootloader are not installed)
+  desktop          the Omarchy Hyprland stack via sddm (no GNOME session)
+  network          REQUIRED - packages come from the Omarchy/ALARM mirrors
+
+  Phases on a real run:
+    1 preflight (target refused if removable/USB/ambiguous)  2 confirm (ERASE <target>)
+    3 partition   4 format   5 mount   6 surface repo from kit
+    7 pacstrap (network + local surface repo)   8 boot-artifact verify
+    9 fstab   10 configure (chroot)   11 GRUB   12 firmware   13 verify
+
+  Use --apply to install; it requires typing ERASE $NVME.
+EOF
+  say "preflight (read-only)"
+  [ -b "$NVME" ] && echo "OK   $NVME present" || echo "FAIL $NVME missing"
+  echo "OK   kit present: $KIT"
+  echo "OK   firmware present: $FW"
+  for t in sfdisk mkfs.vfat mkfs.ext4 pacstrap repo-add arch-chroot genfstab \
+           curl pacman lsblk tar sha256sum; do
+    command -v "$t" >/dev/null 2>&1 && echo "OK   $t" || echo "MISS $t"
+  done
+  echo "NOTE grub-install is provided by the target grub package and runs inside the chroot."
+  echo "NOTE network repos are NOT probed in a dry run; --apply checks them first."
+
+  say "generated-script check (still touching nothing)"
+  TD=$(mktemp -d) || TD="/tmp/spxo-check.$$"
+  mkdir -p "$TD"
+  awk '/^cat > "\$TARGET\/root\/spxo-configure\.sh" <<.CHROOT.$/{f=1;next} /^CHROOT$/{f=0} f' "$0" > "$TD/configure.sh"
+  if [ -s "$TD/configure.sh" ]; then
+    if bash -n "$TD/configure.sh" 2>"$TD/err"; then
+      echo "OK   generated chroot script parses ($(wc -l < "$TD/configure.sh" | tr -d ' ') lines)"
+    else
+      echo "FAIL generated chroot script does NOT parse:"
+      sed 's/^/     /' "$TD/err"
+    fi
+    # Extract the GRUB entry out of the generated configure script.
+    awk '/^cat > \/etc\/grub.d\/09_surface_pro_x <<EOF2$/{f=1;next} /^EOF2$/{f=0} f' "$TD/configure.sh" \
+      | sed 's/\${ROOT_UUID}/DUMMY-UUID-0000/g; s/\\\$0/$0/g' > "$TD/grubd.sh"
+    if [ -s "$TD/grubd.sh" ]; then
+      # Content checks, NOT sh -n: only the first two lines are shell.
+      if head -1 "$TD/grubd.sh" | grep -q '^#!/bin/sh' && sed -n '2p' "$TD/grubd.sh" | grep -q 'exec tail'; then
+        echo "OK   generated GRUB entry has the correct #!/bin/sh + exec tail header"
+      else
+        echo "FAIL generated GRUB entry header is wrong (first two lines):"
+        head -2 "$TD/grubd.sh" | sed 's/^/     /'
+      fi
+      echo "     menuentries: $(grep -c '^menuentry' "$TD/grubd.sh")   devicetree lines: $(grep -c 'devicetree ' "$TD/grubd.sh")"
+      grep -q 'devicetree /dtb/linux-surface/qcom/sc8180x-surface-pro-x.dtb' "$TD/grubd.sh" \
+        && echo "OK   the devicetree line is present in the generated entry" \
+        || echo "FAIL devicetree line missing from the generated entry"
+      grep -q 'root=UUID=DUMMY-UUID-0000' "$TD/grubd.sh" \
+        && echo "OK   the root UUID substitution renders correctly" \
+        || echo "FAIL root UUID did not substitute into the entry"
+    else
+      echo "FAIL could not extract the generated GRUB entry"
+    fi
+  else
+    echo "FAIL could not extract the generated chroot script"
+  fi
+  rm -rf "$TD"
+  echo
+  exit 0
+fi
+
+# ------------------------------------------------------------------- 1 preflight
+say "1. preflight"
+[ -b "$NVME" ] || die "$NVME not found - is the internal disk attached?"
+DISK_TYPE=$(lsblk -dn -o TYPE "$NVME" 2>/dev/null | tr -d ' ')
+DISK_TRAN=$(lsblk -dn -o TRAN "$NVME" 2>/dev/null | tr -d ' ')
+DISK_MODEL=$(lsblk -dn -o MODEL "$NVME" 2>/dev/null)
+if [ -n "${SPXO_TARGET_DISK:-}" ]; then
+  [ "$DISK_TYPE" = "loop" ] || die "SPXO_TARGET_DISK must resolve to a loop device"
+else
+  [ "$DISK_TYPE" = "disk" ] || die "default target is not a whole disk"
+  # Fail closed on removable/USB media: the internal NVMe reports TRAN=nvme.
+  case "$DISK_TRAN" in
+    nvme) ;;
+    *) die "target $NVME transport is '$DISK_TRAN' (model: $DISK_MODEL), not the internal NVMe - refusing a removable/USB/ambiguous target" ;;
+  esac
+  case "$DISK_MODEL" in
+    *SanDisk*|*Rainbow*) die "target $NVME looks like a USB stick ($DISK_MODEL) - refusing" ;;
+  esac
+fi
+echo "OK   target $NVME (type=$DISK_TYPE transport=$DISK_TRAN model=$DISK_MODEL)"
+
+say "1a. network reachability (install needs the mirrors)"
+if [ "$OFFLINE" -eq 1 ]; then
+  echo "OFFLINE MODE - omarchy-pkgcache found in the kit; skipping mirror checks"
+else
+check_repo() {
+  local url="$1" label="$2"
+  curl -fsSL --max-time 30 -o /dev/null "$url" \
+    || die "cannot reach $label ($url) - connect the USB Wi-Fi dongle and retry"
+  echo "OK   $label reachable"
+}
+check_repo "https://pkgs.omarchy.org/edge/aarch64/omarchy.db" "Omarchy aarch64 repo"
+check_repo "https://arm-mirror.omarchy.org/aarch64/core/core.db" "ALARM mirror core"
+fi
+
+for t in sfdisk mkfs.vfat mkfs.ext4 repo-add tar sha256sum pacstrap arch-chroot genfstab curl $([ "$LUKS" -eq 1 ] && echo cryptsetup); do
+  command -v "$t" >/dev/null 2>&1 || die "required tool missing: $t (dosfstools provides mkfs.vfat)"
+done
+[ -d /sys/firmware/efi ] || echo "warn: not booted via EFI - efibootmgr-era tools may misbehave"
+echo "OK   all tools present"
+lsblk -o PATH,TYPE,SIZE,TRAN,VENDOR,MODEL,FSTYPE,LABEL "$NVME"
+echo
+echo "kit: $KIT (read-only)"
+echo
+
+# --------------------------------------------------------------------- 2 confirm
+say "2. confirmation"
+cat <<EOF
+This will DESTROY everything on $NVME:
+
+    $(lsblk -dn -o PATH,TYPE,SIZE,VENDOR,MODEL,FSTYPE,LABEL "$NVME" 2>/dev/null)
+
+Type exactly:  ERASE $NVME
+EOF
+read -r ANSWER
+[ "$ANSWER" = "ERASE $NVME" ] || die "confirmation did not match - aborted"
+
+# ------------------------------------------------------------------ 3 partition
+say "3. partitioning (sfdisk; NOT parted)"
+wipefs -a "$NVME" || true
+sgdisk --zap-all "$NVME" 2>/dev/null || true
+cat > /tmp/spxo-sfdisk.txt <<EOF
+label: gpt
+start=2048, size=$((ESP_MB * 2048)), type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="EFI"
+EOF
+if [ "$LUKS" -eq 1 ]; then
+  cat >> /tmp/spxo-sfdisk.txt <<EOF
+size=$((LBOOT_MB * 2048)), type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="boot"
+type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="cryptroot"
+EOF
+else
+  cat >> /tmp/spxo-sfdisk.txt <<EOF
+type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
+EOF
+fi
+sfdisk "$NVME" < /tmp/spxo-sfdisk.txt || die "sfdisk failed"
+partprobe "$NVME" 2>/dev/null || true
+sleep 2
+[ -b "${NVME}p1" ] || die "partition 1 did not appear"
+[ -b "${NVME}p2" ] || die "partition 2 did not appear"
+[ "$LUKS" -eq 0 ] || [ -b "${NVME}p3" ] || die "partition 3 did not appear"
+lsblk -o NAME,SIZE,FSTYPE "$NVME" 2>/dev/null || lsblk -o NAME,SIZE,FSTYPE "$NVME"
+
+# --------------------------------------------------------------------- 4 format
+say "4. formatting"
+mkfs.vfat -F32 -n EFI "${NVME}p1" || die "mkfs.vfat failed"
+if [ "$LUKS" -eq 1 ]; then
+  mkfs.ext4 -F -L boot "${NVME}p2"   || die "mkfs.ext4 for /boot failed"
+  say "LUKS: formatting the encrypted root (you will be asked for a passphrase twice)"
+  cryptsetup --batch-mode --type luks2 --pbkdf argon2id luksFormat "${NVME}p3" \
+    || die "luksFormat failed"
+  cryptsetup open "${NVME}p3" "$CRYPTROOT" || die "cryptsetup open failed"
+  [ -e "/dev/mapper/$CRYPTROOT" ] || die "the decrypted mapper device never appeared"
+  mkfs.ext4 -F -L root "/dev/mapper/$CRYPTROOT" || die "mkfs.ext4 on the mapper failed"
+  LUKS_UUID=$(blkid -s UUID -o value "${NVME}p3" 2>/dev/null)
+  [ -n "$LUKS_UUID" ] || LUKS_UUID=$(blkid -s UUID -o value "${NVME}p3")
+  [ -n "$LUKS_UUID" ] || die "could not read the LUKS container UUID"
+  echo "LUKS container UUID: $LUKS_UUID"
+  ROOT_UUID=$(blkid -s UUID -o value "/dev/mapper/$CRYPTROOT" 2>/dev/null)
+  [ -n "$ROOT_UUID" ] || ROOT_UUID="unknown-${CRYPTROOT}"
+else
+  mkfs.ext4 -F -L root "${NVME}p2"   || die "mkfs.ext4 failed"
+  ROOT_UUID=$(blkid -s UUID -o value "${NVME}p2")
+  [ -n "$ROOT_UUID" ] || die "could not read the new root UUID"
+  LUKS_UUID=""
+fi
+echo "new root UUID: $ROOT_UUID"
+
+# ---------------------------------------------------------------------- 5 mount
+say "5. mounting"
+mkdir -p "$TARGET"
+if [ "$LUKS" -eq 1 ]; then
+  mount "/dev/mapper/$CRYPTROOT" "$TARGET" || die "mount the decrypted root failed"
+  LBOOT=$(readlink -f "${NVME}p2")
+  mkdir -p "$TARGET/boot"
+  mount "$LBOOT" "$TARGET/boot" || die "mount /boot failed"
+  ESP_DEV=$(readlink -f "${NVME}p1")
+  mkdir -p "$TARGET/boot/efi"
+  mount "$ESP_DEV" "$TARGET/boot/efi" || die "mount ESP at /boot/efi failed"
+else
+  mount "${NVME}p2" "$TARGET" || die "mount root failed"
+  mkdir -p "$TARGET/boot"
+  mount "${NVME}p1" "$TARGET/boot" || die "mount ESP failed"
+fi
+if [ "$LUKS" -eq 1 ]; then
+  ESP_SOURCE=$(findmnt -n -o SOURCE --target "$TARGET/boot/efi" 2>/dev/null)
+  ESP_EXPECTED=$(readlink -f "${NVME}p1")
+  [ "$ESP_SOURCE" = "$ESP_EXPECTED" ] || die "the expected ESP is not mounted at $TARGET/boot/efi"
+  findmnt -no SOURCE,TARGET "$TARGET" "$TARGET/boot/efi"
+else
+  ESP_SOURCE=$(findmnt -n -o SOURCE --target "$TARGET/boot" 2>/dev/null)
+  ESP_EXPECTED=$(readlink -f "${NVME}p1")
+  [ "$ESP_SOURCE" = "$ESP_EXPECTED" ] || die "the expected ESP is not mounted at $TARGET/boot"
+  findmnt -no SOURCE,TARGET "$TARGET" "$TARGET/boot"
+fi
+
+# ---------------------------------------------------- 6 surface repo from kit
+say "6. building the local Surface package repository (from the read-only kit)"
+mkdir -p "$TARGET/var/cache/pacman/pkg"
+cp -f "$KIT"/packages/*.pkg.tar.* "$TARGET/var/cache/pacman/pkg/" 2>/dev/null || true
+( cd "$TARGET/var/cache/pacman/pkg" && repo-add -q surface.db.tar.gz \
+    linux-surface-*.pkg.tar.* linux-surface-headers-*.pkg.tar.* ) \
+  || die "repo-add failed for the Surface packages"
+echo "OK   [surface] file repo built from the kit packages"
+
+if [ "$OFFLINE" -eq 1 ]; then
+  say "6b. loading the offline Omarchy package cache"
+  if [ -n "$OFFLINE_TAR" ]; then
+    echo "-- extracting the package cache onto the target (one-time) --"
+    rm -rf "$TARGET/spxo-cache"
+    mkdir -p "$TARGET/spxo-cache"
+    tar -xf "$OFFLINE_TAR" -C "$TARGET/spxo-cache" \
+      || die "cannot extract kit/omarchy-pkgcache.tar"
+    ( cd "$TARGET/spxo-cache" && sha256sum -c MANIFEST.sha256 ) \
+      || die "omarchy-pkgcache manifest verification failed"
+    OFFLINE_DIR="$TARGET/spxo-cache"
+  fi
+  echo "-- moving packages into the target cache --"
+  mv -f "$OFFLINE_DIR"/pkg/*.pkg.tar.* "$TARGET/var/cache/pacman/pkg/" \
+    || die "moving the offline package cache failed"
+  echo "   $(ls "$TARGET/var/cache/pacman/pkg" | wc -l | tr -d ' ') cached entries"
+  echo "-- placing repository databases for pacstrap --"
+  mkdir -p /var/lib/pacman/sync "$TARGET/var/lib/pacman/sync"
+  # The [surface] repo database was built on the target in phase 6; pacman
+  # resolves against the host sync dir, so register it there too.
+  cp -f "$TARGET/var/cache/pacman/pkg/surface.db.tar.gz" /var/lib/pacman/sync/surface.db \
+    || die "could not register the Surface repo database"
+  cp -f "$OFFLINE_DIR"/sync/*.db /var/lib/pacman/sync/ \
+    || die "copying sync databases to the live host failed"
+  cp -f "$OFFLINE_DIR"/sync/*.db "$TARGET/var/lib/pacman/sync/" \
+    || die "copying sync databases to the target failed"
+  echo "   $(ls "$TARGET/var/lib/pacman/sync" | wc -l | tr -d ' ') repository databases placed"
+  # pacstrap always runs pacman -Sy (refresh DBs). Make that fetch work with
+  # no network: serve every repo from the local cache dir, where each DB is
+  # placed under its transfer name (<repo>.db).
+  echo "-- staging repo databases for the offline -Sy fetch --"
+  cp -f "$OFFLINE_DIR"/sync/*.db "$TARGET/var/cache/pacman/pkg/" \
+    || die "staging repo databases for offline pacstrap failed"
+  # repo-add may leave surface.db as a symlink to the tarball; replace it with
+  # a real file so the file:// fetch and the copy cannot collide.
+  rm -f "$TARGET/var/cache/pacman/pkg/surface.db"
+  cat "$TARGET/var/cache/pacman/pkg/surface.db.tar.gz" > "$TARGET/var/cache/pacman/pkg/surface.db" \
+    || die "staging the surface database failed"
+  [ -n "$OFFLINE_TAR" ] && rm -rf "$OFFLINE_DIR"
+else
+  echo "ONLINE MODE - packages will be fetched from the mirrors"
+fi
+
+OMARCHY_SERVER='https://pkgs.omarchy.org/edge/$arch'
+ALARM_SERVER='https://arm-mirror.omarchy.org/$arch/$repo'
+if [ "$OFFLINE" -eq 1 ]; then
+  # All repos resolve from the local cache dir; the DBs are staged there as
+  # <repo>.db, so pacstrap's pacman -Sy fetches them over file:// with no
+  # network. Packages are already in CacheDir.
+  OMARCHY_SERVER="file://$TARGET/var/cache/pacman/pkg"
+  ALARM_SERVER="file://$TARGET/var/cache/pacman/pkg"
+fi
+
+cat > /tmp/spxo-pacman.conf <<EOF
+[options]
+Architecture = aarch64
+SigLevel = Never
+HoldPkg = pacman glibc
+CacheDir = $TARGET/var/cache/pacman/pkg
+
+[surface]
+Server = file://$TARGET/var/cache/pacman/pkg
+
+[omarchy]
+Server = $OMARCHY_SERVER
+
+[core]
+Server = $ALARM_SERVER
+
+[extra]
+Server = $ALARM_SERVER
+
+[alarm]
+Server = $ALARM_SERVER
+
+[aur]
+Server = $ALARM_SERVER
+EOF
+echo "-- pacman.conf for the install --"
+cat /tmp/spxo-pacman.conf
+
+# ------------------------------------------------------------------- 7 pacstrap
+say "7. installing the base system (network + local Surface repo)"
+# Core system + the Omarchy Hyprland stack (hyprland quickshell foot sddm uwsm
+# come from the omarchy-base.packages list read below; the Qualcomm additions
+# (linux-firmware-qcom, qcom-firmware-extract, systemd-ukify, vulkan-freedreno)
+# come from omarchy-aarch64-qualcomm.packages).
+CORE_PKGS="base base-devel sudo grub efibootmgr dosfstools arch-install-scripts \
+networkmanager bluez-utils nano git $( [ "$LUKS" -eq 1 ] && echo cryptsetup )"
+# shellcheck disable=SC2086
+PKGS="$CORE_PKGS $(read_pkg_list "$PKG_LISTS/omarchy-base.packages" | tr '\n' ' ') \
+$(read_pkg_list "$PKG_LISTS/omarchy-aarch64.packages" | tr '\n' ' ') \
+$(read_pkg_list "$PKG_LISTS/omarchy-aarch64-qualcomm.packages" | tr '\n' ' ') \
+linux-surface linux-surface-headers omarchy omarchy-keyring omarchy-settings"
+echo "-- resolving every package against the configured repositories --"
+pacman -Sp --print-format '%o' --config /tmp/spxo-pacman.conf \
+  --cachedir "$TARGET/var/cache/pacman/pkg" $PKGS > /tmp/spxo-urls.txt \
+  || { echo "-- resolution failed; pacman detail (debug run) --"
+       pacman -Sp --debug --print-format '%o' --config /tmp/spxo-pacman.conf \
+         --cachedir "$TARGET/var/cache/pacman/pkg" $PKGS >/dev/null 2>/tmp/spxo-res-debug.log \
+         || true
+       grep -Ei 'error|cannot|resolve|conflict|unmet|missing' /tmp/spxo-res-debug.log | grep -v 'debug: ' | head -40
+       grep -Ei 'debug:.*(depend|resolve|missing|unmet|conflict)' /tmp/spxo-res-debug.log | head -40
+       echo "-- last debug lines before the abort --"
+       tail -25 /tmp/spxo-res-debug.log
+       die "package resolution failed - a package in the set is unavailable"; }
+MISSING=$(grep -c 'file://$TARGET' /tmp/spxo-urls.txt || true)
+echo "   resolved $(grep -c . /tmp/spxo-urls.txt) packages; $(wc -l < /tmp/spxo-urls.txt | tr -d ' ') download URLs"
+# shellcheck disable=SC2086
+pacstrap -C /tmp/spxo-pacman.conf "$TARGET" $PKGS || die "pacstrap failed"
+
+# Do not rely solely on package hooks: stage and verify the Surface kernel on the ESP.
+say "7a. verify boot artifacts"
+KERNEL_SOURCE=""
+for candidate in "$TARGET"/usr/lib/modules/*/vmlinuz; do
+  [ -f "$candidate" ] || continue
+  pkgbase_file="${candidate%/vmlinuz}/pkgbase"
+  [ -r "$pkgbase_file" ] || continue
+  [ "$(tr -d '\n' < "$pkgbase_file")" = "linux-surface" ] || continue
+  [ -z "$KERNEL_SOURCE" ] || die "multiple linux-surface kernel images found"
+  KERNEL_SOURCE="$candidate"
+done
+[ -n "$KERNEL_SOURCE" ] || die "linux-surface kernel image missing from target"
+install -D -m 0644 "$KERNEL_SOURCE" "$TARGET/boot/vmlinuz-linux-surface" \
+  || die "could not stage the Surface kernel on the ESP"
+[ -s "$TARGET/boot/dtb/linux-surface/qcom/sc8180x-surface-pro-x.dtb" ] \
+  || die "Surface Pro X SQ2 device tree missing from the ESP"
+echo "OK   Surface kernel staged; SQ2 DTB present on the ESP"
+
+# -------------------------------------------------------------------- 8 fstab
+say "8. fstab"
+genfstab -U "$TARGET" >> "$TARGET/etc/fstab"
+cat "$TARGET/etc/fstab"
+
+# ------------------------------------------------------- 9 configure (chroot)
+say "9. configuring the system"
+cat > "$TARGET/root/spxo.conf" <<EOF
+ROOT_UUID=$ROOT_UUID
+LUKS=$LUKS
+LUKS_UUID=$LUKS_UUID
+CRYPTROOT=$CRYPTROOT
+HOSTNAME_=$HOSTNAME_
+USERNAME_=$USERNAME_
+TIMEZONE_=$TIMEZONE_
+LOCALE_=$LOCALE_
+BT_ADDR_=$BT_ADDR_
+SWAP_MB=$SWAP_MB
+EOF
+
+cat > "$TARGET/root/spxo-configure.sh" <<'CHROOT'
+#!/bin/bash
+set -e
+. /root/spxo.conf
+
+echo "-- locale / time / hostname"
+ln -sf "/usr/share/zoneinfo/${TIMEZONE_}" /etc/localtime
+hwclock --systohc || true
+echo "${LOCALE_} UTF-8" > /etc/locale.gen
+locale-gen
+echo "LANG=${LOCALE_}" > /etc/locale.conf
+echo "${HOSTNAME_}" > /etc/hostname
+
+echo "-- persistent journal (a failed boot's logs must survive the next one)"
+mkdir -p /var/log/journal
+systemd-tmpfiles --create --prefix /var/log/journal 2>/dev/null || true
+
+echo "-- user + sudo"
+id "${USERNAME_}" >/dev/null 2>&1 || useradd -m -G wheel -s /bin/bash "${USERNAME_}"
+echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel
+chmod 0440 /etc/sudoers.d/10-wheel
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf /etc/sudoers.d/10-wheel || echo "warn: visudo rejected the sudoers file"
+else
+  echo "warn: visudo absent - check /etc/sudoers.d/10-wheel by hand"
+fi
+
+echo "-- services (sddm + the Hyprland session via uwsm; no GNOME login)"
+systemctl enable NetworkManager
+systemctl enable sddm
+systemctl enable systemd-timesyncd
+
+echo "-- mDNS + shell color pin (autologin deliberately NOT configured)"
+mkdir -p /etc/sddm.conf.d
+systemctl enable --now avahi-daemon 2>/dev/null || systemctl enable avahi-daemon
+
+echo "-- pin QtQuick imports against the Qt 6.12 Color collision (omacom/omarchy#14548)"
+# Qt 6.12 ships a built-in QtQuick/Color singleton that shadows the shell's
+# qs.Commons.Color, rendering the menu as a black overlay with broken content.
+if [ -d /usr/share/omarchy/shell ]; then
+  for f in $(grep -rlE '\bColor\.' /usr/share/omarchy/shell --include=*.qml); do
+    grep -qE '^\s*import QtQuick\s*$' "$f" &&
+      sed -i -E 's/^([[:space:]]*)import QtQuick[[:space:]]*$/\1import QtQuick 6.11/' "$f"
+  done
+fi
+# Post-update hook: omarchy update replaces /usr/share/omarchy; re-pin after.
+UHOME=$(getent passwd "${USERNAME_}" | cut -d: -f6)
+mkdir -p "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d"
+cat > "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision" <<'EOF2'
+#!/bin/bash
+# Workaround for omacom/omarchy#14548 (Qt 6.12 QtQuick/Color shadows
+# qs.Commons.Color). Remove once installed Omarchy includes upstream #14553.
+cd /usr/share/omarchy
+for f in $(grep -rlE '\bColor\.' shell --include=*.qml); do
+  grep -qE '^\s*import QtQuick\s*$' "$f" &&
+    sudo sed -i -E 's/^([[:space:]]*)import QtQuick[[:space:]]*$/\1import QtQuick 6.11/' "$f"
+done
+EOF2
+chmod 0755 "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision"
+chown -R "${USERNAME_}:${USERNAME_}" "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks" 2>/dev/null || true
+
+echo "-- mask the phantom TPM units (90s boot stall on this device)"
+systemctl mask dev-tpm0.device dev-tpmrm0.device
+
+echo "-- bluetooth public address"
+if [ -n "${BT_ADDR_}" ]; then
+cat > /etc/btaddr.conf <<EOF2
+BT_ADDR=${BT_ADDR_}
+EOF2
+fi
+cat > /usr/local/bin/btaddr.sh <<'EOF2'
+#!/bin/sh
+# A controller with NO BD address is not listed by `btmgmt info`, so we cannot wait
+# for it to appear - we retry the set until it reports complete. Runs AFTER
+# bluetooth.service. NEVER restart bluetoothd: that re-initialises hci0 and the QCA
+# firmware download then fails (-110 / -84).
+[ -r /etc/btaddr.conf ] || exit 0
+. /etc/btaddr.conf
+[ -n "${BT_ADDR:-}" ] || exit 0
+i=0
+while [ "$i" -lt 80 ]; do
+  cur=$(btmgmt info 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
+  [ "$cur" = "$BT_ADDR" ] && { echo "btaddr: already $BT_ADDR"; exit 0; }
+  out=$(btmgmt --index 0 public-addr "$BT_ADDR" 2>&1)
+  case "$out" in *complete*) echo "btaddr: set $BT_ADDR"; exit 0;; esac
+  i=$((i + 1)); sleep 0.5
+done
+echo "btaddr: could not set the address after 40s" >&2
+exit 0
+EOF2
+chmod 0755 /usr/local/bin/btaddr.sh
+cat > /etc/systemd/system/btaddr.service <<'EOF2'
+[Unit]
+Description=Set Bluetooth public address (Surface Pro X / WCN399x)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/btaddr.sh
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+systemctl enable btaddr.service
+
+echo "-- GRUB defaults"
+cat > /etc/default/grub <<'EOF2'
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=6
+GRUB_DISTRIBUTOR="Omarchy"
+GRUB_CMDLINE_LINUX="clk_ignore_unused efi=novamap rootwait"
+GRUB_PRELOAD_MODULES="part_gpt part_msdos"
+GRUB_TIMEOUT_STYLE=menu
+GRUB_TERMINAL=gfxterm
+GRUB_GFXMODE="1920x1080,2560x1440,1920x1200,auto"
+GRUB_GFXPAYLOAD_LINUX=keep
+GRUB_DISABLE_RECOVERY=true
+GRUB_DISABLE_SUBMENU=y
+GRUB_DISABLE_OS_PROBER=true
+GRUB_COLOR_NORMAL="light-gray/black"
+GRUB_COLOR_HIGHLIGHT="white/blue"
+EOF2
+
+# LUKSROOT is computed HERE, in the chroot shell, BEFORE the heredoc.
+# Regression 2026-10-16 (root cause of the LUKS first-boot dark screen):
+# the if/else used to live INSIDE the heredoc, but the drop-in is executed
+# by grub-mkconfig as `exec tail -n +3 $0` -- it only PRINTS itself, never
+# evaluates anything. And $LUKSROOT in the unquoted heredoc expanded at
+# generation time to EMPTY, so the emitted linux lines carried NO
+# root=/cryptdevice= args: the kernel unlocked nothing and the boot died
+# dark. Expansion must happen in this shell, before the heredoc.
+if [ "$LUKS" = 1 ]; then
+  LUKSROOT="cryptdevice=UUID=${LUKS_UUID}:cryptroot root=/dev/mapper/${CRYPTROOT}"
+else
+  LUKSROOT="root=UUID=${ROOT_UUID}"
+fi
+echo "-- the critical bit: the devicetree line (without it the kernel boots blind)"
+cat > /etc/grub.d/09_surface_pro_x <<EOF2
+#!/bin/sh
+exec tail -n +3 \$0
+
+menuentry 'Omarchy (Surface Pro X)' {
+    search --no-floppy --file --set=root /vmlinuz-linux-surface
+    linux /vmlinuz-linux-surface ${LUKSROOT} rw clk_ignore_unused efi=novamap rootwait consoleblank=0 loglevel=4
+    initrd /initramfs-linux-surface.img
+    devicetree /dtb/linux-surface/qcom/sc8180x-surface-pro-x.dtb
+}
+
+menuentry 'Omarchy (Surface Pro X) - silent boot' {
+    search --no-floppy --file --set=root /vmlinuz-linux-surface
+    linux /vmlinuz-linux-surface ${LUKSROOT} rw clk_ignore_unused efi=novamap rootwait consoleblank=0 quiet loglevel=3
+    initrd /initramfs-linux-surface.img
+    devicetree /dtb/linux-surface/qcom/sc8180x-surface-pro-x.dtb
+}
+
+menuentry 'Omarchy (Surface Pro X) - verbose, fallback initramfs' {
+    search --no-floppy --file --set=root /vmlinuz-linux-surface
+    linux /vmlinuz-linux-surface ${LUKSROOT} rw clk_ignore_unused efi=novamap rootwait consoleblank=0 loglevel=7
+    initrd /initramfs-linux-surface-fallback.img
+    devicetree /dtb/linux-surface/qcom/sc8180x-surface-pro-x.dtb
+}
+EOF2
+chmod 0755 /etc/grub.d/09_surface_pro_x
+# 10_linux would emit duplicate entries with no devicetree line
+chmod -x /etc/grub.d/10_linux 2>/dev/null || true
+# Content checks, NOT `sh -n`: only the first two lines are shell, the rest is
+# GRUB menuentry syntax.
+head -1 /etc/grub.d/09_surface_pro_x | grep -q '^#!/bin/sh' \
+  || { echo "generated GRUB entry is missing its #!/bin/sh header"; exit 1; }
+grep -q 'devicetree /dtb/linux-surface/qcom/sc8180x-surface-pro-x.dtb' /etc/grub.d/09_surface_pro_x \
+  || { echo "generated GRUB entry has no devicetree line - refusing to continue"; exit 1; }
+sh -n /usr/local/bin/btaddr.sh || { echo "generated btaddr.sh has a syntax error"; exit 1; }
+echo "   generated GRUB entry has a devicetree line; btaddr.sh parses"
+
+echo "-- Omarchy runtime layer"
+if [ -x /usr/bin/omarchy ]; then
+  echo "   omarchy runtime present"
+else
+  echo "   warn: /usr/bin/omarchy missing - the omarchy package may not have installed"
+fi
+# Enable the Hyprland session under sddm; uwsm wraps it when present.
+if [ -f /usr/share/wayland-sessions/hyprland-uwsm.desktop ] || [ -f /usr/share/wayland-sessions/hyprland.desktop ]; then
+  echo "   Hyprland session file present"
+fi
+
+echo "-- swapfile"
+if [ ! -f /swapfile ]; then
+  fallocate -l "${SWAP_MB}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="${SWAP_MB}"
+  chmod 600 /swapfile
+  mkswap /swapfile
+fi
+grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap defaults 0 0' >> /etc/fstab
+
+echo "-- passwords (interactive)"
+passwd
+passwd "${USERNAME_}"
+
+echo "-- initramfs"
+if [ "$LUKS" = 1 ]; then
+  # decrypt the root in early userspace; keyboard/keymap hooks let the Type
+  # Cover type the passphrase (usbhid must be present in early userspace)
+  # Regression 2026-10-16: Omarchy's default HOOKS are SYSTEMD-based
+  # (base systemd ... sd-vconsole). Appending the legacy `encrypt` hook
+  # does nothing under the systemd initramfs -- it is silently ignored and
+  # no passphrase prompt ever appears. The classic encrypt hook REQUIRES
+  # the classic udev-based hook set; rewrite the whole line, don't append.
+  sed -i -E 's/^HOOKS=\(.*\)$/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap block encrypt filesystems fsck)/' /etc/mkinitcpio.conf
+  grep -q '^HOOKS=(base udev' /etc/mkinitcpio.conf || { echo "could not rewrite HOOKS"; exit 1; }
+  grep -qE '^HOOKS=.* encrypt ' /etc/mkinitcpio.conf || { echo "could not add the encrypt hook"; exit 1; }
+  # Guard must anchor on the LIVE HOOKS line only: the conf's comment
+  # examples legitimately mention "systemd" ("#    HOOKS=(base systemd
+  # ... sd-encrypt ...)") and a whole-file grep aborted the install
+  # (regression 2026-10-16, second on-device run).
+  grep -E '^HOOKS=' /etc/mkinitcpio.conf | grep -q 'systemd ' \
+    && { echo "systemd hook still on the live HOOKS line - legacy encrypt hook would be ignored"; exit 1; }
+  sed -i -E 's/^MODULES=\(\)$/MODULES=(xhci-hcd usbhid hid-generic hid-multitouch)/' /etc/mkinitcpio.conf
+  grep MODULES /etc/mkinitcpio.conf | grep -q usbhid || { echo "could not add usbhid to MODULES"; exit 1; }
+  echo "   mkinitcpio.conf: classic udev hook set + encrypt + usb-hid modules"
+fi
+mkinitcpio -P
+CHROOT
+
+chmod 0755 "$TARGET/root/spxo-configure.sh"
+echo "-- syntax-checking the generated configuration script before running it --"
+bash -n "$TARGET/root/spxo-configure.sh" || die "the generated chroot script has a syntax error (nothing was run)"
+if ! chroot_run /bin/bash /root/spxo-configure.sh; then
+  chroot_done
+  echo "!!! the chroot configuration script failed - the failing step is the LAST -- marker above"
+  sleep 2
+  die "chroot configuration failed"
+fi
+chroot_done
+
+# ------------------------------------------------- 9b MineGRUB theme (optional)
+if [ -d "$(dirname "$KIT")/minegrub" ]; then
+  say "9b. MineGRUB theme"
+  mkdir -p "$TARGET/boot/grub/themes" "$TARGET/etc/default/grub.d"
+  cp -r "$(dirname "$KIT")/minegrub" "$TARGET/boot/grub/themes/" \
+    || die "copying the MineGRUB theme failed"
+  printf 'GRUB_THEME=/boot/grub/themes/minegrub/theme.txt\nGRUB_GFXMODE=2880x1920x32,2560x1440x32,1920x1080x32,auto\n' \
+    > "$TARGET/etc/default/grub.d/50-minegrub.cfg"
+  echo "OK   MineGRUB theme staged; GRUB_THEME drop-in written"
+else
+  echo "NOTE no minegrub/ theme dir next to the kit - skipping the theme"
+fi
+
+# -------------------------------------------------------------------- 10 GRUB
+say "10. GRUB"
+echo "-- grub-install (arm64-efi, NEVER aarch64-efi)"
+if [ "$LUKS" -eq 1 ]; then
+chroot_run grub-install --target=arm64-efi \
+  --efi-directory=/boot/efi --boot-directory=/boot --removable || { chroot_done; die "grub-install failed"; }
+else
+chroot_run grub-install --target=arm64-efi \
+  --efi-directory=/boot --boot-directory=/boot --removable || { chroot_done; die "grub-install failed"; }
+fi
+echo "-- grub-mkconfig"
+# The EFI-NVRAM/os-prober generators can hang inside a chroot (efibootmgr on a
+# bind-mounted /sys) and only add menu clutter anyway; keep the custom entry.
+chroot_run chmod -x /etc/grub.d/31_efi_bootnext /etc/grub.d/30_os-prober /etc/grub.d/20_linux_xen 2>/dev/null || true
+echo "-- generating grub.cfg (bounded by timeout so it cannot hang the install)"
+echo "-- the generated grub.cfg: menuentries and devicetree lines follow in the verification phase"
+if ! chroot_run timeout 600 grub-mkconfig -o /boot/grub/grub.cfg 2>&1; then
+  chroot_done
+  echo "!!! grub-mkconfig failed or timed out - its output is above"
+  sleep 2
+  die "grub-mkconfig failed"
+fi
+chroot_done
+
+# ----------------------------------------------------------------- 11 firmware
+say "11. firmware"
+mkdir -p "$TARGET/lib/firmware/updates"
+cp -R "$FW/." "$TARGET/lib/firmware/updates/" || die "firmware copy failed"
+echo "   $(find "$TARGET/lib/firmware/updates" -type f | wc -l | tr -d ' ') firmware files"
+
+# ------------------------------------------------------------------- 12 verify
+say "12. verification (fail closed)"
+FAIL=0
+chk() { if eval "$2"; then echo "OK   $1"; else echo "FAIL $1"; FAIL=1; fi; }
+
+chk "devicetree line present in grub.cfg (THE critical check)" \
+    "grep -q devicetree '$TARGET/boot/grub/grub.cfg'"
+chk "grub.cfg references the new root UUID" \
+    "grep -q '$ROOT_UUID' '$TARGET/boot/grub/grub.cfg'"
+chk "menuentries generated" \
+    "[ \"\$(grep -c '^menuentry' '$TARGET/boot/grub/grub.cfg')\" -ge 3 ]"
+if [ "$LUKS" -eq 1 ]; then
+  chk "LUKS header (luksDump reads the container)" \
+      "cryptsetup luksDump '$NVME'p3 >/dev/null"
+  chk "cryptdevice on a linux cmdline in grub.cfg" \
+      "grep -E '^[[:space:]]*linux /vmlinuz.*cryptdevice=' '$TARGET/boot/grub/grub.cfg' >/dev/null"
+  chk "root=/dev/mapper on a linux cmdline in grub.cfg" \
+      "grep -E '^[[:space:]]*linux /vmlinuz.*root=/dev/mapper/' '$TARGET/boot/grub/grub.cfg' >/dev/null"
+  chk "initramfs carries the encrypt hook config" \
+      "grep -qE '^HOOKS=.*encrypt' '$TARGET/etc/mkinitcpio.conf'"
+  chk "initramfs hook set is udev-based (systemd hook absent)" \
+      "! grep -qE '^HOOKS=\\(.* systemd ' '$TARGET/etc/mkinitcpio.conf'"
+  chk "BOOTAA64.EFI on the ESP" \
+      "[ -f '$TARGET/boot/efi/EFI/BOOT/BOOTAA64.EFI' ]"
+else
+  chk "BOOTAA64.EFI on the ESP" \
+      "[ -f '$TARGET/boot/EFI/BOOT/BOOTAA64.EFI' ]"
+fi
+chk "kernel image present" \
+    "[ -f '$TARGET/boot/vmlinuz-linux-surface' ]"
+chk "initramfs present" \
+    "[ -f '$TARGET/boot/initramfs-linux-surface.img' ]"
+chk "device tree on the ESP" \
+    "[ -f '$TARGET/boot/dtb/linux-surface/qcom/sc8180x-surface-pro-x.dtb' ]"
+chk "firmware copied" \
+    "[ \"\$(find '$TARGET/lib/firmware/updates' -type f | wc -l)\" -ge 60 ]"
+chk "fstab has root and /boot" \
+    "[ \"\$(grep -cE '^(UUID=|/dev/)' '$TARGET/etc/fstab')\" -ge 2 ]"
+chk "swap in fstab" \
+    "grep -q '^/swapfile' '$TARGET/etc/fstab'"
+chk "sudoers for wheel" \
+    "[ -f '$TARGET/etc/sudoers.d/10-wheel' ]"
+chk "btaddr unit enabled" \
+    "[ -L '$TARGET/etc/systemd/system/multi-user.target.wants/btaddr.service' ]"
+chk "TPM units masked" \
+    "[ -L '$TARGET/etc/systemd/system/dev-tpm0.device' ]"
+chk "sddm enabled" \
+    "[ -L '$TARGET/etc/systemd/system/display-manager.service' ]"
+chk "Hyprland session file present" \
+    "[ -n \"\$(find '$TARGET/usr/share/wayland-sessions' -name 'hyprland*.desktop' 2>/dev/null)\" ]"
+chk "Qualcomm firmware installed" \
+    "[ -d '$TARGET/usr/lib/firmware/qcom' ]"
+chk "omarchy runtime installed" \
+    "[ -e '$TARGET/usr/bin/omarchy' ]"
+chk "Surface kernel package installed" \
+    "[ -d '$TARGET/usr/lib/modules' ] && find '$TARGET/usr/lib/modules' -maxdepth 1 -type d -name '6.*-surface*' | grep -q ."
+[ "$FAIL" -eq 0 ] || fail_closed "one or more verification checks failed"
+
+echo
+echo "full grub.cfg menuentries:"
+grep -nE '^menuentry|devicetree' "$TARGET/boot/grub/grub.cfg"
+
+echo
+sync
+umount -R "$TARGET" 2>/dev/null || true
+
+echo
+if [ "$FAIL" -eq 0 ]; then
+  echo "================ INSTALL COMPLETE ================"
+  echo "All checks passed."
+else
+  echo "================ CHECKS FAILED ==================="
+  echo "Do NOT assume this will boot. The report is at:"
+  echo "  $OUT"
+  echo "The disks are unmounted; the previous system is gone either way."
+  exit 1
+fi
+echo
+echo "Remove the stick and power on."
+if [ "$LUKS" -eq 1 ]; then
+  echo "LUKS: type the disk passphrase at every boot in early userspace."
+fi
+echo "REMEMBER: a cold power-on will die at the logo on this device."
+echo "Use Volume Up + Power -> Boot Configuration -> Internal Storage."
+echo
+echo "report saved to: $OUT"

@@ -1,0 +1,14 @@
+# Qualcomm (Snapdragon) additions, composed after omarchy-base.packages and
+# omarchy-aarch64.packages (omarchy-pkg-defaults aarch64-qualcomm): what every
+# Snapdragon laptop runs, which install/hardware/qualcomm/ and vulkan.sh also
+# install.
+linux-firmware-qcom
+# systemd-ukify DROPPED (2026-10-13): it stalls pacman resolution on this set
+# for reasons unclear; we do not need it — UKIs are for the Limine/systemd-stub
+# boot path, and this install uses GRUB + mkinitcpio.
+# Copies the vendor-signed firmware (GPU zap shader, DSP images) from Windows.
+qcom-firmware-extract
+# Builds the UKI with the device trees systemd-stub picks one from.
+# (systemd-ukify itself removed — see DROPPED note above.)
+# Adreno GPUs.
+vulkan-freedreno

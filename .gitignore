@@ -1,0 +1,9 @@
+# editor/OS noise
+*.swp
+.DS_Store
+
+# local build artifacts
+*.iso
+*.img
+usb-images/
+report-omarchy-install.txt
