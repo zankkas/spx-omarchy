@@ -98,9 +98,34 @@ file and let it drive.
 - Repo URLs verified live: `pkgs.omarchy.org/edge/aarch64`,
   `arm-mirror.omarchy.org` (both unsigned DBs — the installer sets
   `SigLevel = Never` for exactly these two).
-- TODO: document/build the linux-surface AArch64 package provenance end to
-  end so a user can assemble a kit from public sources alone.
-- TODO: hostable console-USB image build.
+- Roadmap items (kit provenance recipe, hosted USB image) are tracked in the
+  project's spec folder, not here.
+
+## Credits & provenance
+
+This installer stands on other people's shoulders. It composes their work
+into a path that previously didn't exist; without each of these the install
+is not possible:
+
+- **[linux-surface](https://github.com/linux-surface/linux-surface)** — the
+  foundation. The `linux-surface` kernel, the `sc8180x-surface-pro-x`
+  devicetree, the Surface firmware packages, and most of the install
+  knowledge for this device (boot ritual, firmware handling, kernel flags)
+  come from their packages and documentation. If this project helped you,
+  star/sponsor them — they are the reason a Surface Pro X runs Linux at all.
+- **[Omarchy](https://github.com/omacom/omarchy)** (DHH's Hyprland desktop) —
+  the entire userland layer: package lists (`omarchy-base.packages` etc.),
+  the Omarchy runtime, its AArch64 repository, and the
+  `omarchy.n1x_recovery=1` boot flag that makes its ISO usable as a console
+  install host on this machine.
+- **[Arch Linux ARM](https://archlinuxarm.org)** — the base AArch64 system,
+  package repository, and `pacstrap` tooling (via the Omarchy arm-mirror).
+- **[Hyprland](https://github.com/hyprwm/Hyprland)** — the desktop itself.
+
+Boot-chain debugging specific to this device (the empty-DTB hang, the GRUB
+`devicetree` entry, SDDM and WiFi quirks) was worked out in this project's
+own install sessions and is codified in `docs/known-issues.md` and the
+agent skill — but it builds on the linux-surface wiki install guide.
 
 ## License
 
