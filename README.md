@@ -23,11 +23,10 @@ Omarchy installer targets x86-64 with a boot path that does not work on SQ2,
 and the boot chain (kernel, devicetree, firmware, GRUB) needs Surface-specific
 pieces assembled by hand. A working install traditionally takes days of blind
 console debugging. This repo reduces it to one script and one boot ritual,
-with an AI-agent skill that supports you when your unit misbehaves.
-
-A real install on a Surface Pro X SQ2 was driven end-to-end with this
-installer; that machine is in daily service. Every regression hit along the
-way is codified as a test (46 and counting).
+with an AI-agent skill that supports you when your unit misbehaves. An SQ2
+install was driven end-to-end with this installer and that machine is in
+daily service; every regression hit along the way is codified as a test
+(46 and counting).
 
 ## What you get
 
