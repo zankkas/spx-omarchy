@@ -6,7 +6,7 @@ Upstream Omarchy (n1x) ships aarch64 package lists but boots via its own
 `linux-aarch64` kernel + Limine/UKI path. On SQ2 that kernel cannot drive the
 Type Cover and the Limine path is unproven for the Surface boot chain. The
 proven stack on this device is linux-surface + sc8180x DTB + QCOM firmware +
-GRUB arm64-efi — so this installer keeps that chain and takes only Omarchy's
+GRUB arm64-efi. This installer keeps that chain and takes only Omarchy's
 package layer.
 
 ## Package composition
@@ -21,11 +21,11 @@ pkg-defaults composer does. Every package is verified resolvable
 
 ## Repositories
 
-- `[omarchy]` — `https://pkgs.omarchy.org/edge/aarch64` (unsigned DB →
+- `[omarchy]`: `https://pkgs.omarchy.org/edge/aarch64` (unsigned DB, so
   `SigLevel = Never`).
-- `[core]/[extra]/[alarm]/[aur]` — via `https://arm-mirror.omarchy.org`
+- `[core]/[extra]/[alarm]/[aur]`: via `https://arm-mirror.omarchy.org`
   (unsigned DB).
-- `[surface]` — local file repo built from the kit's linux-surface packages
+- `[surface]`: local file repo built from the kit's linux-surface packages
   via `repo-add offline` (the name `local` is reserved in pacman; a prior
   install failed on exactly that).
 
@@ -38,7 +38,7 @@ pkg-defaults composer does. Every package is verified resolvable
 - Fail-closed final verify: devicetree present in grub.cfg, root UUID,
   BOOTAA64.EFI, kernel, initramfs, DTB, firmware counts, sddm enabled,
   omarchy repo in pacman.conf, Hyprland session file present. Anything
-  missing aborts with a clear message — never a "success" into a black
+  missing aborts with a clear message, never a "success" into a black
   screen.
 - The kit stick, other USB devices, and non-target drives are never written.
 
@@ -58,5 +58,5 @@ python3 tests/test_spx_omarchy_install.py installer/spx-omarchy-install
 
 This is the second-generation approach. The first-generation offline install
 (stick-relayed package cache, hand-rolled dependency resolution) failed 13
-distinct ways — the decisive lesson: never hand-roll pacman resolution; use
+distinct ways. The decisive lesson: never hand-roll pacman resolution; use
 online pacstrap with real pacman as the only oracle.

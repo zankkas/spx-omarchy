@@ -97,7 +97,7 @@ BOUND=0
 chroot_run() {
   # Always use explicit bind mounts. arch-chroot mounts a FRESH devtmpfs on
   # /dev, which carries /dev/dm-0 but NOT the /dev/mapper/<cryptroot> symlink
-  # (that is a udev artifact of the live env's own /dev) — grub-probe then
+  # (that is a udev artifact of the live env's own /dev), grub-probe then
   # dies with "failed to get canonical path of /dev/mapper/cryptroot" and
   # grub-mkconfig aborts (found 2026-10-15 in the loop-device oracle).
   # A wholesale bind of the live env's /dev keeps /dev/mapper visible.

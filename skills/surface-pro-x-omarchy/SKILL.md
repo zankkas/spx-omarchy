@@ -9,7 +9,7 @@ description: >
   agent that can read files and run commands on the machine or over SSH.
 ---
 
-# Surface Pro X Omarchy — install & support skill
+# Surface Pro X Omarchy: install & support skill
 
 This skill accompanies the `spx-omarchy` installer repo. Read
 `docs/known-issues.md` for the full symptom tables; this file is the
@@ -40,11 +40,11 @@ operational flow.
    firmware) + `kit/firmware/`. Missing either → stop, assemble the kit
    first (see install-guide §1).
 2. **Live USB:** must be linux-surface-based (keyboard-proven). If the user
-   only has the generic Omarchy ISO: keyboard will be dead — tell them
+   only has the generic Omarchy ISO: keyboard will be dead. Tell them
    before they burn an hour. Rebuild path in install-guide §2
    (`omarchy.n1x_recovery=1` console entry).
 3. **Network:** USB WiFi dongle; verify both repos reachable (curl -sI).
-4. **Dry run:** `sudo bash kit/spx-omarchy-install` — read the plan with the
+4. **Dry run:** `sudo bash kit/spx-omarchy-install`; read the plan with the
    user: target disk, package counts, repos, verify checklist.
 5. **Apply:** `--apply`, type `ERASE /dev/nvme0n1` at the prompt.
 6. **Post-install:** Volume Up ritual; console login;
@@ -91,8 +91,8 @@ exists and executable; `omarchy update` again with the hook in place.
 
 ### "pacstrap / resolution weirdness" (only for kit builders)
 → real pacman in an arm64 container is the oracle; the failure log of the
-hand-rolled era lives in the repo's history/docs (13 distinct failures —
-do not repeat them).
+hand-rolled era lives in the repo's history/docs (13 distinct failures; do
+not repeat them).
 
 ## Per-device variance (why the trees, not a script)
 
@@ -100,6 +100,6 @@ Every Surface Pro X is a bit different: SQ1 vs SQ2 DTB, kit kernel versions,
 firmware file sets, UEFI firmware revisions, USB dongle chipset. When a step
 doesn't match the user's device, stop and adapt: identify the exact variant
 (`cat /proc/device-tree/model`, `uname -a`, `lsusb`), then choose the
-nearest known-issue and verify against it — never guess silently. Collect
+nearest known-issue and verify against it, never guess silently. Collect
 evidence first (`journalctl -b -p err`, `dmesg`, report file), propose the
 one-step fix, confirm before erase-level or boot-critical actions.
