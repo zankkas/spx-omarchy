@@ -1,3 +1,4 @@
+# Derived from Omarchy's omarchy-base.packages (MIT, github.com/omacom/omarchy).
 # Omarchy core package list pacstrapped by the ISO.
 # The ISO builder also reads this file when constructing the offline mirror.
 
