@@ -37,8 +37,10 @@ operational flow.
    Surface Pro X 2020/WiFi+LTE model 1876+ with SQ2 sticker), NVMe size,
    and that they accept an ERASE-level install.
 1. **Kit check:** `kit/packages/*.pkg.tar.*` (linux-surface, headers,
-   firmware) + `kit/firmware/`. Missing either → stop, assemble the kit
-   first (see install-guide §1).
+   firmware, plus dosfstools and arch-install-scripts) + `kit/firmware/`
+   with both `MANIFEST.sha256` files. Missing either → stop, assemble the
+   kit first (see install-guide section 1: from-scratch recipe from the
+   linux-surface aarch64 repo + the ALARM mirror, no prior install needed).
 2. **Live USB:** must be linux-surface-based (keyboard-proven). If the user
    only has the generic Omarchy ISO: keyboard will be dead. Tell them
    before they burn an hour. Rebuild path in install-guide §2

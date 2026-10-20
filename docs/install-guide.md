@@ -23,10 +23,42 @@ kit/
   firmware/          Surface firmware files (copied to /lib/firmware/updates)
 ```
 
-Provenance: these come from a prior linux-surface-on-ARM64 install or from
-building the linux-surface PKGBUILDs for aarch64. (TODO in README: a
-from-scratch public recipe. Until then, the skill can guide kit assembly from
-an existing install.)
+Two provenance paths exist; both are verified:
+
+**Path A (recommended, no prior install needed): official upstream packages.**
+The linux-surface project publishes prebuilt aarch64 packages at
+`https://pkg.surfacelinux.com/arch-aarch64/`. Download:
+
+- `linux-surface-<ver>-aarch64.pkg.tar.zst` (kernel, validated with 7.2.11-1)
+- `linux-surface-headers-<ver>-aarch64.pkg.tar.zst`
+- `linux-firmware-msft-surface-pro-x-<ver>-any.pkg.tar.zst` (WCN3990 WiFi +
+  qca Bluetooth firmware)
+- `linux-firmware-msft-surface-pro-x-qcom-<ver>-any.pkg.tar.zst` (the
+  `qcom/msft/surface/pro-x-sq2` firmware tree, plus venus-5.2)
+
+Additionally the installer extracts `mkfs.vfat` (dosfstools) and
+`pacstrap`/`arch-chroot`/`genfstab` (arch-install-scripts) from the kit when
+the live USB lacks them, so the kit also carries those two packages from the
+Arch Linux ARM mirror the installer already uses:
+
+- `https://arm-mirror.omarchy.org/aarch64/core/os/aarch64/dosfstools-<ver>-aarch64.pkg.tar.xz`
+- `https://arm-mirror.omarchy.org/aarch64/extra/os/aarch64/arch-install-scripts-<ver>-any.pkg.tar.xz`
+
+Extract the firmware payloads (both `tar -I zstd -xf` / `tar -xf`, then from
+`usr/lib/firmware/` copy `qcom/msft/surface/`, `qcom/venus-5.2/`,
+`ath10k/WCN3990/`, `qca/`) into `kit/firmware/`. Generate the sha256
+manifests the installer verifies (fail-closed: a kit without them is
+rejected):
+
+```sh
+cd kit/packages && sha256sum $(ls *.pkg.tar.*) > MANIFEST.sha256
+cd ../firmware && sha256sum $(find . -type f ! -name MANIFEST.sha256 | sort | sed 's|^\./||') > MANIFEST.sha256
+```
+
+**Path B: a prior linux-surface install or the linux-surface PKGBUILDs.** If
+you already have a working linux-surface-on-ARM64 machine, reuse the packages
+it cached and its firmware. Your own kit is your rescue path, not a rite of
+passage: the recipe above removes the chicken-and-egg problem.
 
 ## 2. Build the console live USB
 

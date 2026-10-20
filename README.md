@@ -54,10 +54,11 @@ fail-closed verifies the boot chain before declaring success.
 
 - A Surface Pro X (SQ1 or SQ2; validated on SQ2) with its NVMe erasable.
 - A recovery kit on USB: linux-surface AArch64 packages (kernel, headers,
-  firmware) + Surface firmware files, as produced by a prior linux-surface
-  install or built from the linux-surface PKGBUILDs. See
-  `docs/install-guide.md` for assembling this; it is the one input the
-  installer cannot fetch for you.
+  firmware) + Surface firmware files, plus two helper packages the installer
+  extracts its own tools from. Assembled in minutes from official upstream
+  sources (the linux-surface aarch64 repo and the Arch Linux ARM mirror; see
+  `docs/install-guide.md` section 1), or reused from a prior linux-surface
+  install. It is the one input the installer cannot fetch for you.
 - A live USB environment based on the linux-surface kernel (so the Type
   Cover keyboard works). The generic Omarchy ISO live session will **not**
   work; its kernel can't drive the keyboard.
@@ -109,8 +110,8 @@ file and let it drive.
 - Repo URLs verified live: `pkgs.omarchy.org/edge/aarch64`,
   `arm-mirror.omarchy.org` (both unsigned DBs; the installer sets
   `SigLevel = Never` for exactly these two).
-- Roadmap items (kit provenance recipe, hosted USB image) are tracked in the
-  project's spec folder, not here.
+- Roadmap items (hosted USB image) are tracked in the project's spec folder,
+  not here.
 
 ## Credits & provenance
 
