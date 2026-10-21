@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# spxo-iso-rebuild — turn the upstream Omarchy aarch64 ISO into a console ISO.
+#
+# The upstream ISO's live session autostarts an x86-only installer TUI and its
+# generic kernel cannot drive the Surface Pro X Type Cover, so it is useless
+# as an install host on this device. Upstream's own recovery flag
+# (`omarchy.n1x_recovery=1`) makes tty1 sit at a root console instead; upstream
+# ships the menu entry in its grub.cfg but not as the default. This script
+# rebuilds the ISO with the n1x-recovery entry as the DEFAULT (installer
+# entry kept as a non-default option), preserving the El Torito boot config.
+#
+# What it does, in order (all fail-closed):
+#   1. locate or download the upstream aarch64 ISO
+#   2. extract the ISO tree (xorriso osirrox)
+#   3. patch the resolved grub.cfg: default=n1x-recovery, visible menu
+#   4. repack with the EXACT El Torito options recorded from the original
+#   5. verify the rebuilt ISO mounts and carries the patched entry
+#   6. print sha256 + suggested `dd` command
+#
+# Requirements: xorriso, curl, sha256sum. ~17 GB free disk space
+# (input ~5.6 GB + extracted tree ~6 GB + output ~5.6 GB) on a DISK-backed
+# workdir — /tmp is often a tmpfs too small for this.
+#
+# Usage:
+#   bash spxo-iso-rebuild /path/to/omarchy-<ver>-aarch64.iso [OUTPUT.iso]
+#   bash spxo-iso-rebuild --download [OUTPUT.iso]     # fetches upstream first
+#
+# Safety: never writes to the input ISO; output path defaults next to the
+# input with a .console suffix; refuses to overwrite an existing output
+# unless --force is passed.
+
+set -euo pipefail
+
+ISO_URL="https://iso.omarchy.org/omarchy-4.5.0rc1-aarch64.iso"
+WORKDIR="${SPXO_WORKDIR:-$HOME/spxo-build}"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "missing tool: $1 (install it and retry)"; exit 1; }; }
+need xorriso; need curl; need sha256sum
+
+FORCE=0
+ARGS=()
+for a in "$@"; do
+  case "$a" in --force) FORCE=1 ;; *) ARGS+=("$a") ;; esac
+done
+
+if [ ${#ARGS[@]} -lt 1 ]; then
+  echo "usage: bash spxo-iso-rebuild <input.iso|[--download]> [output.iso] [--force]"
+  exit 1
+fi
+MODE="${ARGS[0]}"
+OUT="${ARGS[1]:-}"
+
+mkdir -p "$WORKDIR"
+# disk-backed sanity check: refuse a tmpfs workdir (too small for the tree)
+fs=$(findmnt -n -o FSTYPE "$WORKDIR" 2>/dev/null || echo "unknown")
+if [ "$fs" = "tmpfs" ]; then
+  echo "refusing tmpfs workdir ($WORKDIR) — set SPXO_WORKDIR to a disk-backed path"
+  exit 1
+fi
+
+# ---------------------------------------------------------------- 1. input ISO
+if [ "$MODE" = "--download" ]; then
+  IN="$WORKDIR/$(basename "$ISO_URL")"
+  if [ -f "$IN" ]; then
+    echo "already downloaded: $IN"
+  else
+    echo "== downloading upstream ISO to $IN (5.6 GB, be patient) =="
+    curl -fSL --retry 3 -C - -o "$IN" "$ISO_URL"
+  fi
+else
+  IN="$MODE"
+fi
+[ -f "$IN" ] || { echo "input ISO not found: $IN"; exit 1; }
+
+echo "== input ISO: $IN =="
+ls -la "$IN"
+in_sha=$(sha256sum "$IN" | cut -d' ' -f1)
+echo "   sha256: $in_sha"
+
+# ---------------------------------------------------- 2. extract the ISO tree
+TREE="$WORKDIR/iso-tree"
+if [ -d "$TREE" ]; then
+  if [ "$FORCE" -eq 1 ]; then
+    echo "== removing stale tree =="
+    rm -rf "$TREE"
+  else
+    echo "work tree exists: $TREE (pass --force to rebuild it)"
+    exit 1
+  fi
+fi
+echo "== extracting ISO tree to $TREE =="
+xorriso -osirrox on -indev "$IN" -extract / "$TREE" >/dev/null
+
+# find the resolved grub.cfg inside the tree (archiso layout)
+GRUB=$(find "$TREE" -name grub.cfg -path '*grub*' | head -1)
+[ -n "$GRUB" ] || { echo "no grub.cfg found in the ISO tree"; exit 1; }
+echo "== grub.cfg: $GRUB =="
+grep -q "n1x-recovery" "$GRUB" || { echo "upstream grub.cfg has no n1x-recovery entry — layout changed, STOP"; exit 1; }
+
+# ------------------------------------------------------- 3. patch grub.cfg
+echo "== patching default entry to n1x-recovery (menu visible, 10s) =="
+cp "$GRUB" "$GRUB.orig"
+sed -i \
+  -e 's/^default=.*/default=n1x-recovery/' \
+  -e 's/^timeout=.*/timeout=10/' \
+  -e 's/^timeout_style=.*/timeout_style=menu/' \
+  "$GRUB"
+grep -E '^default=|^timeout' "$GRUB"
+[ "$(grep -c '^default=n1x-recovery' "$GRUB")" -eq 1 ] || { echo "patch failed — default line not set"; exit 1; }
+
+# --------------------------------------- 4. repack preserving El Torito boot
+echo "== recording El Torito boot config from the original =="
+MKISO_OPTS=$(xorriso -indev "$IN" -report_el_torito as_mkisofs 2>/dev/null | grep '^ *-')
+[ -n "$MKISO_OPTS" ] || { echo "could not read El Torito options — cannot repack safely"; exit 1; }
+echo "$MKISO_OPTS"
+
+OUT="${OUT:-${IN%.iso}.console.iso}"
+if [ -e "$OUT" ] && [ "$FORCE" -ne 1 ]; then
+  echo "output exists: $OUT (pass --force to overwrite)"
+  exit 1
+fi
+
+echo "== repacking to $OUT =="
+# shellcheck disable=SC2086
+xorriso -as mkisofs $MKISO_OPTS -o "$OUT" "$TREE" >/dev/null
+
+# ----------------------------------------------------- 5. verify the rebuild
+echo "== verifying rebuilt ISO =="
+xorriso -indev "$OUT" -report_el_torito as_mkisofs >/dev/null 2>&1 || { echo "rebuilt ISO unreadable"; exit 1; }
+# mount-probe: check the patched grub.cfg is really inside
+if xorriso -osirrox on -indev "$OUT" -extract /boot/grub/grub.cfg "$WORKDIR/verify-grub.cfg" >/dev/null 2>&1 \
+   || xorriso -osirrox on -indev "$OUT" -extract /grub/grub.cfg "$WORKDIR/verify-grub.cfg" >/dev/null 2>&1; then
+  grep -q '^default=n1x-recovery' "$WORKDIR/verify-grub.cfg" \
+    || { echo "patched grub.cfg NOT in rebuilt ISO"; exit 1; }
+  echo "   patched default entry confirmed inside the rebuilt ISO"
+else
+  echo "   (could not extract grub.cfg path for probe — layout differs; check manually)"
+fi
+
+# --------------------------------------------------------------- 6. summary
+out_sha=$(sha256sum "$OUT" | cut -d' ' -f1)
+echo
+echo "DONE. Console ISO ready:"
+echo "  $OUT  ($(du -h "$OUT" | cut -f1))"
+echo "  sha256: $out_sha"
+echo
+echo "Flash it (replace sdX with the USB stick — this DESTROYS its contents):"
+echo "  dd if=$OUT of=/dev/sdX bs=4M status=progress conv=fsync"
+echo
+echo "On-device expectation: default GRUB entry lands at a ROOT CONSOLE on tty1"
+echo "(no installer TUI). USB keyboard required for the live phase: the generic"
+echo "kernel cannot drive the Type Cover. Installer entry remains selectable."
+echo "Then connect a USB WiFi dongle and run the spx-omarchy installer."

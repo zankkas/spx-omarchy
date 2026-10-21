@@ -6,23 +6,29 @@ description: >
   Linux/Omarchy/Arch on a Surface Pro X, is mid-install and stuck, or reports
   a post-install fault (dead keyboard, dark boot, no WiFi, SDDM login loop,
   missing Bluetooth address, update regressions). Works with any capable AI
-  agent that can read files and run commands on the machine or over SSH.
+  agent that can read files and run commands on its host machine; the agent
+  builds every artifact, the user executes the on-device steps.
 ---
 
 # Surface Pro X Omarchy: install & support skill
 
 You are the agent the user handed this skill to. Your job: take them from
 zero to a working Omarchy install on their Surface Pro X, and diagnose any
-fault along the way. Drive the conversation; confirm with the user before
-every erase-level or boot-critical action.
+fault along the way.
+
+**Division of labor — know your lane.** You build everything that can be
+built from your side: the recovery kit, the console live USB image, the
+package cache, the exact command sequences. The user performs every step
+that physically happens on the Surface itself: the boot ritual, running the
+installer at the console, first login. Once the machine reboots into the USB,
+you have NO access to it — do not pretend to run commands there. When the
+user reports back a symptom, work the decision trees below with them.
 
 Locate the repo first: this skill ships inside the `spx-omarchy` repo, and
 the installer lives at the repo root (`installer/spx-omarchy-install`). If
 the user copied only the skill folder, ask for the repo download before
-starting.
-
-This file accompanies the installer repo. Read `docs/known-issues.md` for
-the full symptom tables; this file is the operational flow.
+starting. Read `docs/known-issues.md` for the full symptom tables; this file
+is the operational flow.
 
 ## Non-negotiables (before any diagnosis)
 
@@ -38,41 +44,79 @@ the full symptom tables; this file is the operational flow.
 5. **LUKS on SQ2 currently ends in a dark first boot** even when every
    artifact verifies. Recommend plain install + UEFI supervisor password.
 6. Erase-level operations: dry-run first, read the plan, confirm target
-   model and size with the user before `--apply`.
+   model and size with the user before `--apply`. The user types
+   `ERASE <target>` themselves — never ask them to paste a command you
+   wrote that erases a disk without them having read the full plan.
 
-## Install walkthrough (condensed)
+## Install walkthrough (agent builds, user executes)
 
-0. **Preflight with the user:** confirm device model (SQ1 vs SQ2: SQ2 =
-   Surface Pro X 2020/WiFi+LTE model 1876+ with SQ2 sticker), NVMe size,
-   and that they accept an ERASE-level install.
-1. **Kit check:** `kit/packages/*.pkg.tar.*` (linux-surface, headers,
-   firmware, plus dosfstools and arch-install-scripts) + `kit/firmware/`
-   with both `MANIFEST.sha256` files. Missing either → stop, assemble the
-   kit first (see install-guide section 1: from-scratch recipe from the
-   linux-surface aarch64 repo + the ALARM mirror, no prior install needed).
-2. **Live USB:** must be linux-surface-based (keyboard-proven). If the user
-   only has the generic Omarchy ISO: keyboard will be dead. Tell them
-   before they burn an hour. Rebuild path in install-guide §2
-   (`omarchy.n1x_recovery=1` console entry).
-3. **Network:** USB WiFi dongle; verify both repos reachable (curl -sI).
-4. **Dry run:** `sudo bash kit/spx-omarchy-install`; read the plan with the
-   user: target disk, package counts, repos, verify checklist.
-5. **Apply:** `--apply`, type `ERASE /dev/nvme0n1` at the prompt.
-6. **Post-install:** Volume Up ritual; console login;
-   `omarchy-provision-user && omarchy-provision-first-run`; then the
-   hardening pass (known-issues #4, #8).
+### Phase A — agent side (do all of this yourself)
+
+A1. **Preflight with the user:** confirm device model (SQ1 vs SQ2: SQ2 =
+    Surface Pro X 2020/WiFi+LTE, model 1876+ with SQ2 sticker), NVMe size,
+    and that they accept an ERASE-level install.
+
+A2. **Build the recovery kit** (`installer/spxo-prep`, on your host):
+    produces `kit/packages/` (linux-surface kernel + headers, both Surface
+    firmware packages, dosfstools, arch-install-scripts) and `kit/firmware/`
+    with both `MANIFEST.sha256` files. Run it, then verify the gates it
+    prints all PASS. If the user already has a kit (e.g. from a stage-1
+    install), verify its manifests instead of rebuilding.
+
+A3. **Build the console live USB** (`installer/spxo-iso-rebuild`, on your
+    host): downloads the upstream Omarchy aarch64 ISO, flips the default
+    GRUB entry to the n1x-recovery root console (`omarchy.n1x_recovery=1`),
+    repacks with the original El Torito boot config, and verifies. The
+    result boots to a root console on tty1 — no installer TUI. IMPORTANT
+    caveat to state up front: the live session's kernel is the generic
+    Omarchy one, so the Type Cover keyboard will be DEAD in the live phase;
+    the user needs a USB keyboard (or a linux-surface-based live USB from a
+    stage-1 clone) for that phase. Tell them before they flash.
+
+A4. **Hand over a single command sheet.** The user's on-device sequence,
+    in order, with nothing left to improvise:
+    1. flash: `dd if=<console.iso> of=<usb-device> bs=4M status=progress
+       conv=fsync` (agent gives the exact device node from the user's `lsblk`
+       output; never guess a device letter)
+    2. boot ritual: Volume Up + Power → Boot Configuration → select USB
+    3. in the root console: connect the USB WiFi dongle, get online
+       (`iwctl` if the dongle driver needs it, or `ip link` + DHCP)
+    4. mount the kit: `mkdir -p /run/usb && mount /dev/<usb-part> /run/usb`
+       (the kit can ride on a second partition of the same stick or a second
+       stick)
+    5. dry run: `bash /run/usb/kit/spx-omarchy-install` — have the user
+       read the plan back to you; you check it against expectations (target
+       disk model/size, package counts, repos)
+    6. apply: `bash /run/usb/kit/spx-omarchy-install --apply` and the user
+       types `ERASE /dev/nvme0n1` themselves
+    7. reboot ritual: Volume Up + Power → Boot Configuration → internal disk
+    8. first login at console: `omarchy-provision-user &&
+       omarchy-provision-first-run`
+
+A5. **Stand by.** The user walks the sheet; you do not touch the machine.
+    When they report back (plan output, errors, symptoms), diagnose per the
+    trees below.
+
+### Phase B — user side (theirs, not yours)
+
+Everything in A4's sheet. Your involvement: reading outputs back, confirming
+each step before they fire it, catching wrong-device mistakes BEFORE `dd`
+and before `--apply` (ask for `lsblk` output and name the exact device node
+yourself, then make the user confirm it).
 
 ## Troubleshooting decision trees
 
-Symptom-first. Grep the installer's `report-omarchy-install.txt` (it is
-written next to the kit) before touching the console.
+Symptom-first. Ask the user for the installer's `report-omarchy-install.txt`
+(it is written next to the kit) before touching anything.
 
 ### "Keyboard doesn't work in the live USB"
 → Live env kernel is generic linux-aarch64 → the Type Cover is unsupported
-→ rebuild/use a linux-surface live USB. Do NOT try to debug USB hid.
+→ USB keyboard for the live phase, or a linux-surface-based live USB (stage-1
+clone). Do NOT try to debug USB hid.
 
 ### "Install finished but boot goes dark after GRUB"
-1. Boot the live USB, mount the target, `grep -E '^linux' /target/boot/grub/grub.cfg`
+1. Have the user re-enter the live USB, mount the target, and run
+   `grep -E '^linux' /target/boot/grub/grub.cfg`
 2. Check: `cryptdevice`/`root=` present? `clk_ignore_unused efi=novamap
    rootwait` present? DTB (`devicetree`) line present?
 3. All present + LUKS install → firmware-class wall, ADR-known; recommend
