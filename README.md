@@ -3,30 +3,9 @@
 Scripted, reproducible **Omarchy (Hyprland + Wayland) for the Surface Pro X
 (SQ1/SQ2, ARM64)**.
 
-## The story
-
-The Surface Pro X ships with 8 GB of RAM, and under Windows 11 that is a
-machine already gasping at idle: 6 to 7 GB gone before you open anything.
-The hardware was never the problem. Windows was. The goal was always to turn
-this device into a Linux machine, because 8 GB that Windows wastes is plenty
-that Linux can actually use.
-
-The result: the same device now runs a full Hyprland desktop in a fraction of
-that memory, and it runs a **local LLM**, something unthinkable under Windows
-11 on this hardware. The point of this repo is not rescuing a machine
-Microsoft dropped. It is showing how much more these devices can do than
-anyone expects from them.
-
-That said, getting there is genuinely hard: the internal WiFi does not probe,
-the Type Cover keyboard dies in every generic ARM live environment, the stock
-Omarchy installer targets x86-64 with a boot path that does not work on SQ2,
-and the boot chain (kernel, devicetree, firmware, GRUB) needs Surface-specific
-pieces assembled by hand. A working install traditionally takes days of blind
-console debugging. This repo reduces it to one script and one boot ritual,
-with an AI-agent skill that supports you when your unit misbehaves. An SQ2
-install was driven end-to-end with this installer and that machine is in
-daily service; every regression hit along the way is codified as a test
-(46 and counting).
+A Surface Pro X under Windows 11 idles with 6 to 7 GB of its 8 GB already
+gone. This repo turns it into a full Hyprland desktop with room to spare,
+in one scripted pass.
 
 ## What you get
 
@@ -38,6 +17,63 @@ daily service; every regression hit along the way is codified as a test
 | `skills/surface-pro-x-omarchy/` | Agent skill: guided install + per-device troubleshooting for when things don't work |
 | `docs/` | Full install guide, known-issues matrix, design notes |
 
+## Install
+
+What you do, in order. Every step in full detail lives in
+`docs/install-guide.md`.
+
+0. **You need:** a Surface Pro X (SQ1 or SQ2; validated on SQ2) whose NVMe
+   you can erase.
+1. **Assemble the recovery kit** (about 10 minutes, no prior install needed):
+   linux-surface kernel + headers + Surface firmware packages, downloaded
+   from official upstream sources and laid out as `kit/packages/` +
+   `kit/firmware/` with sha256 manifests. Exact recipe (including the two
+   helper packages the installer requires): `docs/install-guide.md`,
+   section 1.
+2. **Build the console live USB.** It must be linux-surface-based so the
+   Type Cover keyboard works; the generic Omarchy ISO live session cannot
+   drive the keyboard. Build steps: `docs/install-guide.md`, section 2.
+3. **Plug in a USB WiFi dongle.** The internal WCN3990 radio does not probe
+   on SQ2.
+4. **Run the installer** from the live USB session (as root, dongle
+   connected):
+
+   ```sh
+   bash /path/to/spx-omarchy-install            # dry run: full plan, zero writes
+   bash /path/to/spx-omarchy-install --apply    # then type: ERASE /dev/nvme0n1
+   ```
+
+5. **Reboot** via Volume Up + Power → Boot Configuration, select the internal
+   disk. Then at first login:
+
+   ```sh
+   omarchy-provision-user && omarchy-provision-first-run
+   ```
+
+Safety posture: dry-run is the default; the target disk must be an NVMe
+`TYPE=disk` that is not the boot media or any removable device; overrides are
+restricted to loop devices for testing; any missing boot artifact aborts the
+install instead of "succeeding" into a black screen.
+
+## Why this exists
+
+The Surface Pro X ships with 8 GB of RAM, and under Windows 11 that is a
+machine already gasping at idle. The hardware was never the problem; Windows
+was. The device now runs a full Hyprland desktop in a fraction of that
+memory, and it runs a **local LLM**, something unthinkable under Windows 11
+on this hardware. The point of this repo is not rescuing a machine Microsoft
+dropped. It is showing how much more these devices can do than anyone
+expects from them.
+
+Getting there is genuinely hard: the internal WiFi does not probe, the Type
+Cover keyboard dies in every generic ARM live environment, the stock Omarchy
+installer targets x86-64 with a boot path that does not work on SQ2, and the
+boot chain (kernel, devicetree, firmware, GRUB) needs Surface-specific pieces
+assembled by hand. A working install traditionally takes days of blind
+console debugging. An SQ2 install was driven end-to-end with this installer
+and that machine is in daily service; every regression hit along the way is
+codified as a test (46 and counting).
+
 ## The approach in one paragraph
 
 Keep the proven Surface boot path (`linux-surface` kernel, the
@@ -45,39 +81,7 @@ Keep the proven Surface boot path (`linux-surface` kernel, the
 `devicetree` line and the Surface flags) and layer the Omarchy package stack
 on top via online pacstrap from the Omarchy AArch64 repository plus Arch Linux
 ARM mirrors. The Omarchy `linux-aarch64` kernel and Limine boot path are
-deliberately not used; they do not work on SQ2. The installer runs from a
-linux-surface-based live USB (keyboard-proven), builds a local `[surface]`
-file repo from your recovery kit's packages, pacstraps the full desktop, then
-fail-closed verifies the boot chain before declaring success.
-
-## What you need
-
-- A Surface Pro X (SQ1 or SQ2; validated on SQ2) with its NVMe erasable.
-- A recovery kit on USB: linux-surface AArch64 packages (kernel, headers,
-  firmware) + Surface firmware files, plus two helper packages the installer
-  extracts its own tools from. Assembled in minutes from official upstream
-  sources (the linux-surface aarch64 repo and the Arch Linux ARM mirror; see
-  `docs/install-guide.md` section 1), or reused from a prior linux-surface
-  install. It is the one input the installer cannot fetch for you.
-- A live USB environment based on the linux-surface kernel (so the Type
-  Cover keyboard works). The generic Omarchy ISO live session will **not**
-  work; its kernel can't drive the keyboard.
-- A USB WiFi dongle (the internal WCN3990 radio does not probe on SQ2).
-
-## Quickstart
-
-```sh
-# from the live USB session (root, USB WiFi dongle connected):
-bash /path/to/spx-omarchy-install            # dry run: full plan, zero writes
-bash /path/to/spx-omarchy-install --apply    # then type: ERASE /dev/nvme0n1
-# reboot via Volume Up + Power → Boot Configuration
-# first login: omarchy-provision-user && omarchy-provision-first-run
-```
-
-Safety posture: dry-run is the default; the target disk must be an NVMe
-`TYPE=disk` that is not the boot media or any removable device; overrides are
-restricted to loop devices for testing; any missing boot artifact aborts the
-install instead of "succeeding" into a black screen.
+deliberately not used; they do not work on SQ2.
 
 ## Honest caveats
 
