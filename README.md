@@ -11,16 +11,36 @@ in one scripted pass.
 
 | Piece | What it is |
 |---|---|
-| `installer/spx-omarchy-install` | Fail-closed 12-phase installer (dry-run default; `--apply` requires typing `ERASE <target>`) |
+| `skills/surface-pro-x-omarchy/` | **The centerpiece**: agent skill that takes you from zero to installed Omarchy, and carries per-device diagnosis when anything misbehaves |
+| `installer/spx-omarchy-install` | Fail-closed 12-phase installer (dry-run default; `--apply` requires typing `ERASE <target>`); the skill drives this |
 | `installer/omarchy-packages/*.packages` | Omarchy AArch64 package lists (base + aarch64 + qualcomm) |
 | `tests/` | 46 regression tests that run the installer's logic against real assertions |
-| `skills/surface-pro-x-omarchy/` | Agent skill: guided install + per-device troubleshooting for when things don't work |
 | `docs/` | Full install guide, known-issues matrix, design notes |
 
-## Install
+## The fast path: hand it to your agent
 
-What you do, in order. Every step in full detail lives in
-`docs/install-guide.md`.
+The skill is built for any capable AI agent (Claude Code, Hermes, Cursor,
+...). The agent does the driving; you do the confirming.
+
+1. **Get the skill:** download this repo (or just `skills/surface-pro-x-omarchy/`)
+   and put the folder where your agent reads skills.
+2. **Start a conversation:** tell your agent something like *"I want to
+   install Omarchy on my Surface Pro X, using this skill"*. The agent takes
+   it from there: it preflights your device (SQ1 vs SQ2, NVMe size), checks
+   you have the recovery kit and a keyboard-proven live USB, runs the
+   installer's dry run, and walks the boot ritual with you.
+3. **Stuck at any point?** Same skill: it carries the diagnosis decision
+   trees for every known failure mode (dead keyboard, dark boot, no WiFi,
+   SDDM login loop, missing Bluetooth address).
+
+The skill never erases anything on its own: the installer defaults to a
+dry run, and the actual install requires you to type `ERASE <target>`
+yourself. Your agent reads the plan with you before anything is written.
+
+## Install (doing it yourself)
+
+If you'd rather drive without an agent, the full manual path is in
+`docs/install-guide.md`. The short version, in order:
 
 0. **You need:** a Surface Pro X (SQ1 or SQ2; validated on SQ2) whose NVMe
    you can erase.
@@ -97,14 +117,11 @@ deliberately not used; they do not work on SQ2.
 - The USB image itself is not hosted yet; `docs/install-guide.md` documents
   building the console live USB.
 
-## The agent skill
+## The agent skill file
 
-`skills/surface-pro-x-omarchy/SKILL.md` is written for any capable AI agent
-(Claude Code, Hermes, Cursor, ...) that the user has on hand. It walks the
-full install and, more importantly, carries the diagnosis decision trees for
-the failure modes that differ per device: dead keyboard, dark boot, no WiFi,
-SDDM login loop, missing Bluetooth address. Point your agent at the skill
-file and let it drive.
+`skills/surface-pro-x-omarchy/SKILL.md` is self-contained: operational flow,
+non-negotiables, and the symptom-first decision trees. Read it if you want
+to see exactly how your agent will behave before letting it drive.
 
 ## Status & provenance
 

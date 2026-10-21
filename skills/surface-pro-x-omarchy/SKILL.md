@@ -11,9 +11,18 @@ description: >
 
 # Surface Pro X Omarchy: install & support skill
 
-This skill accompanies the `spx-omarchy` installer repo. Read
-`docs/known-issues.md` for the full symptom tables; this file is the
-operational flow.
+You are the agent the user handed this skill to. Your job: take them from
+zero to a working Omarchy install on their Surface Pro X, and diagnose any
+fault along the way. Drive the conversation; confirm with the user before
+every erase-level or boot-critical action.
+
+Locate the repo first: this skill ships inside the `spx-omarchy` repo, and
+the installer lives at the repo root (`installer/spx-omarchy-install`). If
+the user copied only the skill folder, ask for the repo download before
+starting.
+
+This file accompanies the installer repo. Read `docs/known-issues.md` for
+the full symptom tables; this file is the operational flow.
 
 ## Non-negotiables (before any diagnosis)
 
