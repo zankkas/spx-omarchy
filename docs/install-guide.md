@@ -76,12 +76,36 @@ The manifests are fail-closed: a kit without them is rejected.
 
 ## 2. Build the console live USB
 
-You need a live environment whose kernel drives the Type Cover. The reliable
-recipe: clone or rebuild a linux-surface-based live USB, or take the upstream
-Omarchy ISO and rebuild its default GRUB entry to add
-`omarchy.n1x_recovery=1`, upstream's own recovery flag. It makes tty1 sit at
-a root console instead of autostarting the (x86-only) installer TUI. The
-live env needs:
+You need a live environment whose kernel drives the Type Cover — or, for the
+rebuild path below, a live environment with a root console and a USB keyboard.
+
+The reliable recipe: take the upstream Omarchy aarch64 ISO and rebuild its
+default GRUB entry to add `omarchy.n1x_recovery=1`, upstream's own recovery
+flag. It makes tty1 sit at a root console instead of autostarting the
+(x86-only) installer TUI. Upstream ships the menu entry in its grub.cfg but
+not as the default; the rebuild flips the default (installer entry stays
+selectable) and repacks the ISO with its original El Torito boot config:
+
+```sh
+bash installer/spxo-iso-rebuild --download [OUTPUT.iso]
+# or from an already-downloaded upstream ISO:
+bash installer/spxo-iso-rebuild /path/to/omarchy-<ver>-aarch64.iso [OUTPUT.iso]
+```
+
+The script is fail-closed: it refuses a tmpfs workdir, never writes to the
+input ISO, verifies the El Torito options are readable before repacking, and
+probes the rebuilt ISO to confirm the patched grub.cfg is inside. Needs
+`xorriso`, `curl`, `sha256sum` and about 17 GB of disk-backed free space.
+
+What the rebuilt ISO does on-device: the default GRUB entry lands at a root
+console on tty1 (no installer TUI); the original installer entry remains
+selectable in the menu. One honest caveat: the live session's kernel is the
+generic Omarchy aarch64 one, so **the Type Cover keyboard is dead in the
+live phase** — plug in a USB keyboard for that phase (the internal NVMe and
+USB WiFi dongle work fine), or clone a linux-surface-based live USB instead
+if you have one from a stage-1 install.
+
+The live env needs:
 `pacstrap arch-chroot genfstab repo-add sfdisk mkfs.vfat mkfs.ext4 curl`.
 
 ## 3. Network
