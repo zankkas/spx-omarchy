@@ -25,11 +25,15 @@ The skill is built for any capable AI agent (Claude Code, Hermes, Cursor,
 1. **Get the skill:** download this repo (or just `skills/surface-pro-x-omarchy/`)
    and put the folder where your agent reads skills.
 2. **Start a conversation:** tell your agent something like *"I want to
-   install Omarchy on my Surface Pro X, using this skill"*. The agent takes
-   it from there: it preflights your device (SQ1 vs SQ2, NVMe size), builds
-   the recovery kit with `installer/spxo-prep` if you don't have one, checks
-   you have a keyboard-proven live USB, runs the installer's dry run, and
-   walks the boot ritual with you.
+   install Omarchy on my Surface Pro X, using this skill"*. The agent builds
+   everything it can from its side: it preflights your device (SQ1 vs SQ2,
+   NVMe size), builds the recovery kit with `installer/spxo-prep` if you
+   don't have one, prepares the live USB, and gives you the exact commands
+   to run. The device-side steps are yours — rebooting into the USB (Volume
+   Up + Power ritual), running the installer at the console, and the first
+   login — because the agent has no access to the machine while it boots.
+   If anything misbehaves on-device, you bring the symptom back and the
+   agent works the decision trees with you.
 3. **Stuck at any point?** Same skill: it carries the diagnosis decision
    trees for every known failure mode (dead keyboard, dark boot, no WiFi,
    SDDM login loop, missing Bluetooth address).
