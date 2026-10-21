@@ -25,40 +25,54 @@ kit/
 
 Two provenance paths exist; both are verified:
 
-**Path A (recommended, no prior install needed): official upstream packages.**
-The linux-surface project publishes prebuilt aarch64 packages at
-`https://pkg.surfacelinux.com/arch-aarch64/`. Download:
+**Path A (the route this repo was built and validated on): a stage-1 install.**
+Before Omarchy, put a minimal Arch ARM install with the linux-surface kernel
+on the device: the Type Cover keyboard works there, so you have a
+network-connected, self-hosting machine. That first install is temporary;
+its pacman cache and `/lib/firmware` tree ARE the kit:
 
-- `linux-surface-<ver>-aarch64.pkg.tar.zst` (kernel, validated with 7.2.11-1)
-- `linux-surface-headers-<ver>-aarch64.pkg.tar.zst`
-- `linux-firmware-msft-surface-pro-x-<ver>-any.pkg.tar.zst` (WCN3990 WiFi +
-  qca Bluetooth firmware)
-- `linux-firmware-msft-surface-pro-x-qcom-<ver>-any.pkg.tar.zst` (the
-  `qcom/msft/surface/pro-x-sq2` firmware tree, plus venus-5.2)
+- copy the cached `linux-surface`, `linux-surface-headers`,
+  `linux-firmware-msft-surface-pro-x*` packages into `kit/packages/`
+- also cache `dosfstools` and `arch-install-scripts` there (the installer
+  extracts `mkfs.vfat` and `pacstrap`/`arch-chroot`/`genfstab` from them if
+  the live USB lacks them)
+- copy `qcom/msft/surface/`, `qcom/venus-5.2/`, `ath10k/WCN3990/`, `qca/`
+  from `/lib/firmware` into `kit/firmware/`
 
-Additionally the installer extracts `mkfs.vfat` (dosfstools) and
-`pacstrap`/`arch-chroot`/`genfstab` (arch-install-scripts) from the kit when
-the live USB lacks them, so the kit also carries those two packages from the
-Arch Linux ARM mirror the installer already uses:
+Then erase the stage-1 install and let the installer put Omarchy in its
+place. Your own install is your rescue path, not a rite of passage.
 
-- `https://arm-mirror.omarchy.org/aarch64/core/os/aarch64/dosfstools-<ver>-aarch64.pkg.tar.xz`
-- `https://arm-mirror.omarchy.org/aarch64/extra/os/aarch64/arch-install-scripts-<ver>-any.pkg.tar.xz`
+**Path B (no prior install): build the kit from official upstream sources.**
+Run `installer/spxo-prep` on any host with curl/tar/sha256sum (macOS, Linux,
+WSL):
 
-Extract the firmware payloads (both `tar -I zstd -xf` / `tar -xf`, then from
-`usr/lib/firmware/` copy `qcom/msft/surface/`, `qcom/venus-5.2/`,
-`ath10k/WCN3990/`, `qca/`) into `kit/firmware/`. Generate the sha256
-manifests the installer verifies (fail-closed: a kit without them is
-rejected):
+```sh
+bash installer/spxo-prep [OUTPUT_DIR]     # default: ./kit
+```
+
+It resolves the current package versions from the upstream indexes, downloads
+them, extracts the firmware payload, and writes both `MANIFEST.sha256` files,
+then runs the same gate checks the installer uses. Sources:
+
+- linux-surface packages: `https://pkg.surfacelinux.com/arch-aarch64/`
+  (`linux-surface`, `linux-surface-headers`,
+  `linux-firmware-msft-surface-pro-x`, `linux-firmware-msft-surface-pro-x-qcom`)
+- helper packages: `dosfstools` and `arch-install-scripts` from the
+  Arch Linux ARM mirror the installer already uses
+  (`https://arm-mirror.omarchy.org/aarch64/{core,extra}/`)
+
+The equivalent manual recipe, if you'd rather not run the script: download
+the four Surface packages and two helper packages, extract the firmware
+payloads (`tar -I zstd -xf`, then copy `usr/lib/firmware/{ath10k/WCN3990,
+qcom/msft/surface,qcom/venus-5.2,qca}` into `kit/firmware/`), and generate
+the manifests:
 
 ```sh
 cd kit/packages && sha256sum $(ls *.pkg.tar.*) > MANIFEST.sha256
 cd ../firmware && sha256sum $(find . -type f ! -name MANIFEST.sha256 | sort | sed 's|^\./||') > MANIFEST.sha256
 ```
 
-**Path B: a prior linux-surface install or the linux-surface PKGBUILDs.** If
-you already have a working linux-surface-on-ARM64 machine, reuse the packages
-it cached and its firmware. Your own kit is your rescue path, not a rite of
-passage: the recipe above removes the chicken-and-egg problem.
+The manifests are fail-closed: a kit without them is rejected.
 
 ## 2. Build the console live USB
 

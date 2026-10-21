@@ -26,9 +26,10 @@ The skill is built for any capable AI agent (Claude Code, Hermes, Cursor,
    and put the folder where your agent reads skills.
 2. **Start a conversation:** tell your agent something like *"I want to
    install Omarchy on my Surface Pro X, using this skill"*. The agent takes
-   it from there: it preflights your device (SQ1 vs SQ2, NVMe size), checks
-   you have the recovery kit and a keyboard-proven live USB, runs the
-   installer's dry run, and walks the boot ritual with you.
+   it from there: it preflights your device (SQ1 vs SQ2, NVMe size), builds
+   the recovery kit with `installer/spxo-prep` if you don't have one, checks
+   you have a keyboard-proven live USB, runs the installer's dry run, and
+   walks the boot ritual with you.
 3. **Stuck at any point?** Same skill: it carries the diagnosis decision
    trees for every known failure mode (dead keyboard, dark boot, no WiFi,
    SDDM login loop, missing Bluetooth address).
@@ -44,12 +45,16 @@ If you'd rather drive without an agent, the full manual path is in
 
 0. **You need:** a Surface Pro X (SQ1 or SQ2; validated on SQ2) whose NVMe
    you can erase.
-1. **Assemble the recovery kit** (about 10 minutes, no prior install needed):
-   linux-surface kernel + headers + Surface firmware packages, downloaded
-   from official upstream sources and laid out as `kit/packages/` +
-   `kit/firmware/` with sha256 manifests. Exact recipe (including the two
-   helper packages the installer requires): `docs/install-guide.md`,
-   section 1.
+1. **Assemble the recovery kit** (one-time; two routes, both proven):
+   - **Stage-1 install (the route this repo was built on):** first put a
+     minimal Arch ARM install with the linux-surface kernel on the device
+     (the Type Cover works there). That first install is temporary; its
+     pacman cache and firmware tree ARE the kit. Then erase it and install
+     Omarchy on top.
+   - **No prior install:** run `installer/spxo-prep` on any host (macOS,
+     Linux, WSL); it builds the exact kit from official upstream sources
+     in about 10 minutes.
+   Layout, gates, and the stage-1 detail: `docs/install-guide.md`, section 1.
 2. **Build the console live USB.** It must be linux-surface-based so the
    Type Cover keyboard works; the generic Omarchy ISO live session cannot
    drive the keyboard. Build steps: `docs/install-guide.md`, section 2.
