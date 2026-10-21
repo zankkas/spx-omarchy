@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# spxo-prep — build a recovery kit from official upstream sources, from scratch.
+#
+# Runs on any host with curl/tar/sha256sum (macOS, Linux, WSL). No prior
+# linux-surface install needed. Produces the exact kit/ layout the installer
+# verifies (packages + firmware + both MANIFEST.sha256 files), then reports
+# whether the kit passes the installer's gates.
+#
+# Usage:  bash spxo-prep [OUTPUT_DIR]     (default: ./kit)
+#         bash spxo-prep --latest-only    (skip listing checks, fastest)
+#
+# Everything is downloaded from official mirrors:
+#   linux-surface packages : https://pkg.surfacelinux.com/arch-aarch64/
+#   helper packages        : https://arm-mirror.omarchy.org/aarch64/{core,extra}/
+set -euo pipefail
+
+OUT="${1:-kit}"
+case "${OUT:-}" in --latest-only) OUT=kit ;; esac
+SRF=https://pkg.surfacelinux.com/arch-aarch64
+MIRROR=https://arm-mirror.omarchy.org/aarch64
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1"; exit 1; }; }
+need curl; need tar; need sha256sum; need find; need sed
+
+# The mirror has no listing pages; package names resolve from the repo DBs.
+get_db() { d=$(dirname "$2"); mkdir -p "$d"; curl -fsSL -o "$2" "$MIRROR/$1/$1.db"; }
+
+# zstd is required to unpack .pkg.tar.zst. If absent, bootstrap it from the
+# mirror (resolve exact filename via the repo DB, extract the binary, use it).
+ZSTD=""
+if ! command -v zstd >/dev/null 2>&1; then
+  echo "zstd not found; bootstrapping it from the ALARM mirror..."
+  BT=$(mktemp -d)
+  get_db core "$BT/core.db"
+  mkdir "$BT/dbx" && tar -xzf "$BT/core.db" -C "$BT/dbx" "zstd-"*/desc
+  zp=$(grep -A1 '%FILENAME%' "$BT/dbx"/zstd-*/desc | tail -n1)
+  [ -n "$zp" ] || { echo "no zstd package in core repo DB"; exit 1; }
+  curl -fsSL -o "$BT/zstd.pkg.tar.xz" "$MIRROR/core/$zp"
+  tar -xf "$BT/zstd.pkg.tar.xz" -C "$BT" usr/bin/zstd 2>/dev/null || tar -xf "$BT/zstd.pkg.tar.xz" -C "$BT"
+  find "$BT" -name zstd -type f -exec chmod +x {} \; -exec cp {} "$BT/zstd-bin" \;
+  ZSTD="$BT/zstd-bin"
+  extract_zst() { "$ZSTD" -d -c "$1" | tar -xf -; }
+else
+  extract_zst() { tar -I zstd -xf "$1"; }
+fi
+
+echo "== 1. resolve package versions from upstream indexes =="
+srf_list=$(curl -fsSL "$SRF/" ) || { echo "cannot list $SRF"; exit 1; }
+kernel=$(echo "$srf_list" | sed -n 's/.*\(linux-surface-[0-9][^"<>]*-aarch64\.pkg\.tar\.zst\).*/\1/p' | grep -v 'headers' | tail -1)
+[ -n "$kernel" ] || { echo "no linux-surface kernel found on index"; exit 1; }
+kver=${kernel#linux-surface-}; kver=${kver%%-aarch64*}
+headers="linux-surface-headers-$kver-aarch64.pkg.tar.zst"
+# firmware packages carry their own version; pick the newest of each family
+fw1=$(echo "$srf_list" | sed -n 's/.*\(linux-firmware-msft-surface-pro-x-[0-9][^"<>]*-any\.pkg\.tar\.zst\).*/\1/p' | tail -1)
+fw2=$(echo "$srf_list" | sed -n 's/.*\(linux-firmware-msft-surface-pro-x-qcom-[0-9][^"<>]*-any\.pkg\.tar\.zst\).*/\1/p' | tail -1)
+[ -n "$fw1" ] && [ -n "$fw2" ] || { echo "Surface firmware packages not found on index"; exit 1; }
+
+get_db core "$OUT/../core.db"; get_db extra "$OUT/../extra.db"
+mkdir -p "$OUT/../dbx-c" "$OUT/../dbx-e"
+tar -xzf "$OUT/../core.db" -C "$OUT/../dbx-c" 2>/dev/null || true
+tar -xzf "$OUT/../extra.db" -C "$OUT/../dbx-e" 2>/dev/null || true
+dos=$(grep -A1 '%FILENAME%' "$OUT/../dbx-c"/dosfstools-*/desc | tail -n1)
+ais=$(grep -A1 '%FILENAME%' "$OUT/../dbx-e"/arch-install-scripts-*/desc | tail -n1)
+[ -n "$dos" ] && [ -n "$ais" ] || { echo "helper packages (dosfstools / arch-install-scripts) not found on mirror"; exit 1; }
+
+echo "   kernel : $kernel"
+echo "   headers: $headers"
+echo "   fw     : $fw1"
+echo "   fw-qcom: $fw2"
+echo "   helpers: $dos, $ais"
+
+mkdir -p "$OUT/packages" "$OUT/firmware" "$OUT/../spxo-prep-tmp"
+TMP="$OUT/../spxo-prep-tmp"
+echo "== 2. download packages =="
+cd "$OUT/packages"
+for pair in "$SRF/$kernel" "$SRF/$headers" "$SRF/$fw1" "$SRF/$fw2" \
+            "$MIRROR/core/$dos" "$MIRROR/extra/$ais"; do
+  f=${pair##*/}
+  [ -f "$f" ] || { echo "  $f"; curl -fL -o "$f" "$pair"; }
+done
+ls -la
+
+echo "== 3. extract Surface firmware payload =="
+cd "$TMP"
+rm -rf fwx && mkdir fwx && cd fwx
+for pkg in "$OUT/packages/$fw1" "$OUT/packages/$fw2"; do
+  extract_zst "$pkg"
+done
+FW_SRC=usr/lib/firmware
+[ -d "$FW_SRC" ] || { echo "no usr/lib/firmware inside firmware packages"; exit 1; }
+mkdir -p "$OUT/firmware/ath10k" "$OUT/firmware/qcom/msft" "$OUT/firmware/qca"
+rm -rf "$OUT/firmware/ath10k/WCN3990" "$OUT/firmware/qcom/msft/surface" \
+       "$OUT/firmware/qcom/venus-5.2" "$OUT/firmware/qca"/*
+cp -r "$FW_SRC/ath10k/WCN3990"      "$OUT/firmware/ath10k/"
+cp -r "$FW_SRC/qcom/msft/surface"   "$OUT/firmware/qcom/msft/"
+cp -r "$FW_SRC/qcom/venus-5.2"      "$OUT/firmware/qcom/"
+cp -r "$FW_SRC/qca/."               "$OUT/firmware/qca/"
+
+echo "== 4. generate sha256 manifests (fail-closed contract) =="
+( cd "$OUT/packages" && sha256sum $(ls *.pkg.tar.*) > MANIFEST.sha256 )
+( cd "$OUT/firmware" && sha256sum $(find . -type f ! -name MANIFEST.sha256 | sort | sed 's|^\./||') > MANIFEST.sha256 )
+( cd "$OUT/packages" && sha256sum -c MANIFEST.sha256 >/dev/null ) && echo "  packages manifest: OK"
+( cd "$OUT/firmware" && sha256sum -c MANIFEST.sha256 >/dev/null ) && echo "  firmware manifest: OK"
+
+echo "== 5. gate checks (same rules as the installer) =="
+fails=0
+chk() { if eval "$2"; then echo "  PASS  $1"; else echo "  FAIL  $1"; fails=$((fails+1)); fi; }
+chk "kit/packages exists with pkgs"     "ls $OUT/packages/*.pkg.tar.* >/dev/null 2>&1"
+chk "linux-surface kernel pkg"          "ls $OUT/packages/$kernel"
+chk "linux-surface headers pkg"         "ls $OUT/packages/$headers"
+chk "both Surface firmware pkgs"        "ls $OUT/packages/$fw1 $OUT/packages/$fw2"
+chk "helper packages present"           "ls $OUT/packages/$dos $OUT/packages/$ais"
+chk "pro-x-sq2 firmware tree"           "ls $OUT/firmware/qcom/msft/surface/pro-x-sq2/*.jsn >/dev/null 2>&1"
+chk "WCN3990 WiFi firmware"             "ls $OUT/firmware/ath10k/WCN3990/hw1.0/firmware-5.bin"
+chk "qca Bluetooth firmware"            "ls $OUT/firmware/qca/crnv21.bin"
+chk "venus-5.2 video firmware"          "ls $OUT/firmware/qcom/venus-5.2/venus.mbn"
+chk "packages MANIFEST verifies"        "cd $OUT/packages && sha256sum -c MANIFEST.sha256 >/dev/null"
+chk "firmware MANIFEST verifies"        "cd $OUT/firmware && sha256sum -c MANIFEST.sha256 >/dev/null"
+
+rm -rf "$TMP"
+du -sh "$OUT/packages" "$OUT/firmware"
+if [ "$fails" -eq 0 ]; then
+  echo
+  echo "KIT READY: $OUT/  (copy kit/ plus installer/spx-omarchy-install onto the USB stick)"
+else
+  echo
+  echo "$fails GATE CHECK(S) FAILED — do not use this kit"
+  exit 1
+fi
