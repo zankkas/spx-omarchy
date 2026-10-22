@@ -126,6 +126,26 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("pin-qtquick-color-collision", SOURCE_TEXT)
         self.assertIn("hooks/post-update.d", SOURCE_TEXT)
 
+    def test_patches_omarchy_pkg_add_for_aur_menu_installs(self):
+        # Upstream omarchy-pkg-add runs a bare `pacman -S`, so Omarchy menu
+        # entries whose packages live only in the AUR (VS Code, Zed, ChatGPT,
+        # Spotify, Dropbox, NordVPN, 1Password, LM Studio, T3 Code, OpenClaw,
+        # Hermes Desktop, ...) fail with "error: target not found" (the menu's
+        # "cannot find the software"). The installer must ship the yay-fallback
+        # helper AND keep it applied across `omarchy update` (pacman Path hook
+        # plus a post-update hook).
+        self.assertIn("omarchy-pkg-add", SOURCE_TEXT)
+        self.assertIn("aur_pkgs", SOURCE_TEXT)
+        self.assertIn("yay -S --noconfirm --needed", SOURCE_TEXT)
+        self.assertIn("/usr/local/share/omarchy-patches/omarchy-pkg-add", SOURCE_TEXT)
+        self.assertIn("90-omarchy-pkg-add-yay.hook", SOURCE_TEXT)
+        self.assertIn("patch-omarchy-pkg-add", SOURCE_TEXT)
+        # x86_64-only AUR packages must be refused on aarch64, not handed to
+        # yay (yay does not pre-filter by architecture and starts an x86_64
+        # build). The helper checks each AUR package's PKGBUILD arch first.
+        self.assertIn("yay -Gp", SOURCE_TEXT)
+        self.assertIn("no aarch64 build in the AUR", SOURCE_TEXT)
+
     def test_symlink_checks_use_dash_l(self):
         # -e follows absolute unit symlinks into the live environment and
         # produces false FAILs; enabled-service checks must test the link (-L).

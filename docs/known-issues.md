@@ -69,6 +69,26 @@ Symptom-first. Each entry: what you see → cause → fix. The agent skill
 - iptables variants, jack2/pipewire-jack, qt6 multimedia: pacstrap takes the
   first default when non-interactive. Decide explicitly if you care.
 
+## 11. Omarchy menu instal fails: "cannot find the software" (AUR apps)
+- **Symptom:** installing VS Code, Zed, ChatGPT, Spotify, Dropbox, NordVPN,
+  1Password, LM Studio, T3 Code, OpenClaw, Hermes Desktop (or any AUR-only app)
+  from the Omarchy menu reports `error: target not found`.
+- **Cause:** upstream `omarchy-pkg-add` runs a bare `pacman -S`. pacman only
+  sees core/extra/alarm, so AUR-only packages never resolve. The correct helper
+  (`omarchy-pkg-aur-add` -> yay) exists but only the browser/emacs scripts use
+  it; most menu entries call the pacman one. This is an upstream bug, present in
+  `basecamp/omarchy` master too.
+- **Fix:** the installer ships a patched `omarchy-pkg-add` that sends sync-repo
+  packages to pacman and AUR-only packages to yay, and keeps it applied after
+  updates (pacman hook `90-omarchy-pkg-add-yay.hook` + post-update hook
+  `patch-omarchy-pkg-add`), both restoring
+  `/usr/local/share/omarchy-patches/omarchy-pkg-add`. On an installed system
+  also note: many of these packages are `x86_64`-only in the AUR (Spotify,
+  LM Studio, 1Password desktop, Dropbox, T3 Code, Heroic, supergfxctl,
+  symfony-cli) and cannot install on aarch64 at all, even with the patch;
+  use a Flatpak or the web app for those. Test with
+  `pacman -Si <pkg>` (fails) vs `yay -Si <pkg>` (Repository: aur).
+
 ## Collecting evidence for support
 
 The installer writes `report-omarchy-install.txt` next to the kit, and the

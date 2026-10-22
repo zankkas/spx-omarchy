@@ -662,6 +662,120 @@ EOF2
 chmod 0755 "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision"
 chown -R "${USERNAME_}:${USERNAME_}" "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks" 2>/dev/null || true
 
+echo "-- patch omarchy-pkg-add: AUR fallback for Omarchy menu installs"
+# Upstream routes many Omarchy menu entries (VS Code, Zed, ChatGPT, Spotify,
+# Dropbox, NordVPN, 1Password, LM Studio, T3 Code, OpenClaw, Hermes Desktop,
+# ...) through omarchy-pkg-add, which runs a bare `pacman -S`. pacman only
+# sees core/extra/alarm, so those entries fail with "error: target not found"
+# (the menu's "cannot find the software"). The helper below sends sync-repo
+# packages to pacman and AUR-only packages to yay. It stays applied across
+# `omarchy update` two ways: a pacman Path hook (reinstall on package upgrade)
+# and a post-update hook (reinstall after any update), both restoring the copy
+# under /usr/local/share/omarchy-patches/.
+mkdir -p /usr/local/share/omarchy-patches /etc/pacman.d/hooks
+cat > /usr/local/share/omarchy-patches/omarchy-pkg-add <<'EOF3'
+#!/bin/bash
+
+# omarchy:summary=Install Arch packages if they are missing
+# omarchy:args=<packages...>
+# omarchy:examples=omarchy pkg add jq ripgrep
+# omarchy:requires-sudo=true
+#
+# spx-omarchy patch: classify each requested package. Present in an official
+# sync repo -> pacman. AUR and builds for aarch64/any -> yay. AUR but x86_64
+# only (or missing) -> refuse with a clear message and alternatives, instead
+# of letting yay start an x86_64 build on ARM. Upstream omarchy-pkg-add calls
+# pacman for everything, so AUR-only menu entries fail with
+# "error: target not found".
+
+if omarchy-pkg-missing "$@"; then
+  repo_pkgs=()
+  aur_pkgs=()
+  for pkg in "$@"; do
+    if pacman -Si -- "$pkg" &>/dev/null; then
+      repo_pkgs+=("$pkg")
+    else
+      aur_pkgs+=("$pkg")
+    fi
+  done
+
+  rc=0
+  if ((${#repo_pkgs[@]})); then
+    if (( EUID == 0 )); then
+      pacman -S --noconfirm --needed -- "${repo_pkgs[@]}" || exit 1
+    else
+      sudo pacman -S --noconfirm --needed -- "${repo_pkgs[@]}" || exit 1
+    fi
+  fi
+
+  if ((${#aur_pkgs[@]})); then
+    ok=()
+    no=()
+    for pkg in "${aur_pkgs[@]}"; do
+      arch_line=$(yay -Gp "$pkg" 2>/dev/null | grep -m1 '^arch=' || true)
+      case "$arch_line" in
+        *aarch64*|*any*) ok+=("$pkg") ;;
+        *) no+=("$pkg") ;;
+      esac
+    done
+
+    if ((${#ok[@]})); then
+      if (( EUID != 0 )) && command -v yay &>/dev/null; then
+        yay -S --noconfirm --needed "${ok[@]}" || rc=1
+      else
+        echo -e "\033[31mError: ${ok[*]} needs the desktop user with yay installed.\033[0m" >&2
+        rc=1
+      fi
+    fi
+
+    if ((${#no[@]})); then
+      echo -e "\033[31mNot available for this device (ARM64 / aarch64):\033[0m" >&2
+      for pkg in "${no[@]}"; do
+        echo "  - ${pkg}: no aarch64 build in the AUR (x86_64 only, or the package does not exist)" >&2
+      done
+      echo "  Try a Flatpak, the vendor's web app, or an aarch64-native package instead." >&2
+      rc=1
+    fi
+  fi
+
+  (( rc == 0 )) || exit "$rc"
+fi
+
+for pkg in "$@"; do
+  # Secondary check to handle states where pacman doesn't actually register an error
+  if ! pacman -Q -- "$pkg" &>/dev/null; then
+    echo -e "\033[31mError: Package '$pkg' did not install\033[0m" >&2
+    exit 1
+  fi
+done
+
+exit 0
+EOF3
+chmod 0755 /usr/local/share/omarchy-patches/omarchy-pkg-add
+install -m 0755 /usr/local/share/omarchy-patches/omarchy-pkg-add /usr/bin/omarchy-pkg-add
+cat > /etc/pacman.d/hooks/90-omarchy-pkg-add-yay.hook <<'EOF3'
+[Trigger]
+Operation = Upgrade
+Type = Path
+Target = usr/bin/omarchy-pkg-add
+
+[Action]
+Description = Re-applying AUR (yay) fallback patch to omarchy-pkg-add (spx-omarchy)
+When = PostTransaction
+Exec = /usr/bin/install -m 0755 /usr/local/share/omarchy-patches/omarchy-pkg-add /usr/bin/omarchy-pkg-add
+AbortOnFail = No
+EOF3
+UPATCH="${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d"
+mkdir -p "$UPATCH"
+cat > "$UPATCH/patch-omarchy-pkg-add" <<'EOF3'
+#!/bin/bash
+# omarchy update replaces /usr/bin/omarchy-pkg-add; re-apply the AUR (yay)
+# fallback so the Omarchy menu keeps installing AUR-only apps.
+sudo install -m 0755 /usr/local/share/omarchy-patches/omarchy-pkg-add /usr/bin/omarchy-pkg-add
+EOF3
+chmod 0755 "$UPATCH/patch-omarchy-pkg-add"
+chown -R "${USERNAME_}:${USERNAME_}" "$UPATCH" 2>/dev/null || true
+
 echo "-- mask the phantom TPM units (90s boot stall on this device)"
 systemctl mask dev-tpm0.device dev-tpmrm0.device
 
