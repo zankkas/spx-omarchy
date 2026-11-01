@@ -1,13 +1,10 @@
 ---
 name: surface-pro-x-omarchy
 description: >
-  Guided install and troubleshooting for running Omarchy (Arch + Hyprland,
-  AArch64) on a Surface Pro X (SQ1/SQ2). Use when the user wants to install
-  Linux/Omarchy/Arch on a Surface Pro X, is mid-install and stuck, or reports
-  a post-install fault (dead keyboard, dark boot, no WiFi, SDDM login loop,
-  missing Bluetooth address, update regressions). Works with any capable AI
-  agent that can read files and run commands on its host machine; the agent
-  builds every artifact, the user executes the on-device steps.
+  Guided install and troubleshooting for Omarchy (Arch + Hyprland, AArch64) on
+  a Surface Pro X (SQ1/SQ2). Use when the user wants the install, is stuck
+  mid-install, or reports a post-install fault. The agent builds; the user
+  executes on-device.
 ---
 
 # Surface Pro X Omarchy: install & support skill

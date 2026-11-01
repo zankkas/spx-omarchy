@@ -1,0 +1,10 @@
+{
+  "cases": [
+    { "id": "spx-preflight-first" },
+    { "id": "spx-erase-ownership" },
+    { "id": "spx-dead-keyboard-live" },
+    { "id": "spx-wifi-dongle" },
+    { "id": "spx-bluetooth-rule" },
+    { "id": "spx-skill-only" }
+  ]
+}

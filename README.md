@@ -33,26 +33,13 @@ Validated on an SQ2 in daily service.
 | `tests/` | 46 regression tests that run the installer's logic against real assertions |
 | `docs/` | Full install guide, known-issues matrix, design notes |
 
-## The fast path: hand it to your agent
+## The fast path: clone it and tell your agent
 
-The skill is built for any capable AI agent (Claude Code, Hermes, Cursor,
-...). The agent does the driving; you do the confirming.
+To start, clone the repo in a safe location, open your agent in that folder, and say **"spx, set up the machine"**. A boot gateway (`AGENTS.md`) tells the agent to load the skill and know its lane from the first turn — you can also paste a link to [`skills/surface-pro-x-omarchy/SKILL.md`](skills/surface-pro-x-omarchy/SKILL.md) into a conversation elsewhere, but the clone is the zero-setup path. The agent does the driving; you do the confirming.
 
-1. **Get the skill:** download this repo (or just `skills/surface-pro-x-omarchy/`)
-   and put the folder where your agent reads skills.
-2. **Start a conversation:** tell your agent something like *"I want to
-   install Omarchy on my Surface Pro X, using this skill"*. The agent builds
-   everything it can from its side: it preflights your device (SQ1 vs SQ2,
-   NVMe size), builds the recovery kit with `installer/spxo-prep` if you
-   don't have one, prepares the live USB, and gives you the exact commands
-   to run. The device-side steps are yours — rebooting into the USB (Volume
-   Up + Power ritual), running the installer at the console, and the first
-   login — because the agent has no access to the machine while it boots.
-   If anything misbehaves on-device, you bring the symptom back and the
-   agent works the decision trees with you.
-3. **Stuck at any point?** Same skill: it carries the diagnosis decision
-   trees for every known failure mode (dead keyboard, dark boot, no WiFi,
-   SDDM login loop, missing Bluetooth address).
+The agent builds everything it can from its side: it preflights your device (SQ1 vs SQ2, NVMe size), builds the recovery kit with `installer/spxo-prep` if you don't have one, prepares the live USB, and gives you the exact commands to run. The device-side steps are yours — rebooting into the USB (Volume Up + Power ritual), running the installer at the console, and the first login — because the agent has no access to the machine while it boots. If anything misbehaves on-device, you bring the symptom back and the agent works the decision trees with you.
+
+Stuck at any point? Same skill: it carries the diagnosis decision trees for every known failure mode (dead keyboard, dark boot, no WiFi, SDDM login loop, missing Bluetooth address).
 
 The skill never erases anything on its own: the installer defaults to a
 dry run, and the actual install requires you to type `ERASE <target>`
