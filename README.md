@@ -16,10 +16,7 @@ Behind that fight sat the setup I actually wanted. A thin, keyboard-first
 Linux desktop that runs AI work fast and works remotely. Knowing it was there
 is what made the fight worth finishing.
 
-So the path is written down. A fail-closed installer, 46 regression tests, and
-an agent skill that takes you from zero to a complete Omarchy setup. You hand
-the skill to your agent and it does most of the work. What is left is a USB
-stick, the device itself, and one or two commands.
+So the path is written down. A fail-closed installer, 46 regression tests, and an agent skill that takes you from zero to a complete Omarchy setup. The clone is the setup: open your agent in it, say "spx, set up the machine", and the agent does most of the work. What is left is a USB stick, the device itself, and one or two commands.
 
 Validated on an SQ2 in daily service.
 
@@ -27,7 +24,8 @@ Validated on an SQ2 in daily service.
 
 | Piece | What it is |
 |---|---|
-| `skills/surface-pro-x-omarchy/` | **The centerpiece**: agent skill that takes you from zero to installed Omarchy, and carries per-device diagnosis when anything misbehaves |
+| `skills/surface-pro-x-omarchy/` | **The centerpiece**: agent skill that takes you from zero to installed Omarchy, and carries per-device diagnosis when anything misbehaves; gated by eval cases in `skills/surface-pro-x-omarchy/evals/` |
+| `AGENTS.md` + `CLAUDE.md` | Boot gateway: opening an agent in the clone discovers the skill with zero manual placement |
 | `installer/spx-omarchy-install` | Fail-closed 12-phase installer (dry-run default; `--apply` requires typing `ERASE <target>`); the skill drives this |
 | `installer/omarchy-packages/*.packages` | Omarchy AArch64 package lists (base + aarch64 + qualcomm) |
 | `tests/` | 46 regression tests that run the installer's logic against real assertions |
@@ -133,7 +131,10 @@ deliberately not used; they do not work on SQ2.
 
 `skills/surface-pro-x-omarchy/SKILL.md` is self-contained: operational flow,
 non-negotiables, and the symptom-first decision trees. Read it if you want
-to see exactly how your agent will behave before letting it drive.
+to see exactly how your agent will behave before letting it drive. Its
+changes are gated: the skill carries eval cases in
+`skills/surface-pro-x-omarchy/evals/`, and an edit without a recorded pass
+does not ship.
 
 ## Status & provenance
 
