@@ -7,6 +7,22 @@ A Surface Pro X under Windows 11 idles with 6 to 7 GB of its 8 GB already
 gone. This repo turns it into a full Hyprland desktop with room to spare,
 in one scripted pass.
 
+## Why this exists
+
+The machine is good. Windows is what makes it unusable: six to seven of its
+eight gigabytes are gone before you open anything.
+
+Behind that fight sat the setup I actually wanted. A thin, keyboard-first
+Linux desktop that runs AI work fast and works remotely. Knowing it was there
+is what made the fight worth finishing.
+
+So the path is written down. A fail-closed installer, 46 regression tests, and
+an agent skill that takes you from zero to a complete Omarchy setup. You hand
+the skill to your agent and it does most of the work. What is left is a USB
+stick, the device itself, and one or two commands.
+
+Validated on an SQ2 in daily service.
+
 ## What you get
 
 | Piece | What it is |
