@@ -45,8 +45,28 @@ class RepositoryTests(unittest.TestCase):
         self.assertNotIn("[local]", SOURCE_TEXT)
 
     def test_pacman_conf_uses_omarchy_and_alarm_mirror(self):
-        self.assertIn("pkgs.omarchy.org/edge/$arch", SOURCE_TEXT)
+        # The channel is a knob (stable by default, upstream's own default for
+        # new installs); base packages always come from Arch Linux ARM.
+        self.assertIn("OMARCHY_CHANNEL=${SPXO_CHANNEL:-stable}", SOURCE_TEXT)
+        self.assertIn("pkgs.omarchy.org/$OMARCHY_CHANNEL/", SOURCE_TEXT)
         self.assertIn("arm-mirror.omarchy.org/$arch/$repo", SOURCE_TEXT)
+        self.assertNotIn("pkgs.omarchy.org/edge/$arch", SOURCE_TEXT)
+
+    def test_unknown_channel_is_refused(self):
+        self.assertRegex(SOURCE_TEXT, r"SPXO_CHANNEL must be stable, rc or edge")
+        self.assertIn("stable|rc|edge", SOURCE_TEXT)
+
+    def test_target_pacman_conf_gets_omarchy_above_core(self):
+        # pacstrap leaves the ALARM pacman.conf, which has no [omarchy] stanza:
+        # the installed system then cannot update Omarchy at all. The chroot
+        # phase must insert it above [core] and the final verify must check it.
+        chroot = SOURCE_TEXT.split("cat > \"$TARGET/root/spxo-configure.sh\"", 1)[1]
+        chroot = chroot.split("\nCHROOT", 1)[0]
+        self.assertIn("[omarchy]", chroot)
+        self.assertRegex(chroot, r"/\^\\\[core\\\]/ && !inserted")
+        self.assertIn("OMARCHY_CHANNEL=$OMARCHY_CHANNEL", SOURCE_TEXT)
+        verify = SOURCE_TEXT.split("12. verification", 1)[1]
+        self.assertIn("grep -q '^\\[omarchy\\]' '$TARGET/etc/pacman.conf'", verify)
 
     def test_network_repos_are_unsigned(self):
         # Both Omarchy's and the ALARM mirror ship unsigned databases.
@@ -118,13 +138,25 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("20-autologin.conf", SOURCE_TEXT)
         self.assertNotIn("Session=hyprland", SOURCE_TEXT)
 
-    def test_pins_qtquick_against_color_collision(self):
-        # omacom/omarchy#14548: Qt 6.12 QtQuick/Color shadows qs.Commons.Color
-        # and the shell menu renders black. The installer must pin the import
-        # in the installed shell tree AND ship the post-update hook.
-        self.assertIn("import QtQuick 6.11", SOURCE_TEXT)
-        self.assertIn("pin-qtquick-color-collision", SOURCE_TEXT)
-        self.assertIn("hooks/post-update.d", SOURCE_TEXT)
+    def test_no_qtquick_import_pin(self):
+        # omacom/omarchy#14548 (Qt 6.12 QtQuick/Color shadowing qs.Commons.Color)
+        # was fixed upstream in #14553 and ships from 4.0.5. Pinning the import
+        # freezes the shell on old QML APIs, so the installer must not do it and
+        # must not ship a post-update hook that re-applies it.
+        self.assertNotIn("import QtQuick 6.11", SOURCE_TEXT)
+        self.assertNotIn("pin-qtquick-color-collision", SOURCE_TEXT)
+
+    def test_omarchy_repo_is_listed_before_the_arch_repos(self):
+        # pacman takes a name from the first repo that carries it. The omarchy
+        # repo pins hyprland, which keeps omarchy-hyprland-titlebars satisfied;
+        # ALARM's newer hyprland aborts the transaction otherwise.
+        conf = SOURCE_TEXT.split("cat > /tmp/spxo-pacman.conf <<EOF", 1)[1]
+        conf = conf.split("\nEOF", 1)[0]
+        order = [line.strip() for line in conf.splitlines() if line.startswith("[")]
+        self.assertLess(order.index("[omarchy]"), order.index("[core]"), order)
+        # and ahead of every other Arch/ALARM repo, not just [core]
+        for repo in ("[core]", "[extra]", "[alarm]", "[aur]"):
+            self.assertLess(order.index("[omarchy]"), order.index(repo), order)
 
     def test_patches_omarchy_pkg_add_for_aur_menu_installs(self):
         # Upstream omarchy-pkg-add runs a bare `pacman -S`, so Omarchy menu
@@ -427,6 +459,117 @@ class LuksTests(unittest.TestCase):
         # and plain /dev/nvme0n1pX entries instead of root UUIDs; the phase-12
         # check must count all device/UUID fstab entries, not just ^UUID=.
         self.assertIn("^(UUID=|/dev/)", SOURCE_TEXT)
+
+class UpdatePathTests(unittest.TestCase):
+    """The two scripts an already-installed machine needs (install-guide 7)."""
+
+    @staticmethod
+    def _fixture(extra_repo=None):
+        conf = (
+            "[options]\nArchitecture = aarch64\nSigLevel = Never\n\n"
+            + (extra_repo or "")
+            + "[core]\nInclude = /etc/pacman.d/mirrorlist\n\n"
+            "[extra]\nInclude = /etc/pacman.d/mirrorlist\n\n"
+            "[alarm]\nInclude = /etc/pacman.d/mirrorlist\n"
+        )
+        handle = tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False)
+        handle.write(conf)
+        handle.close()
+        return Path(handle.name)
+
+    def test_repo_restore_puts_omarchy_first_in_dry_run(self):
+        restore = SOURCE.parent / "spxo-repo-restore"
+        conf = self._fixture()
+        try:
+            out = subprocess.run(
+                ["bash", str(restore), "--dry-run", "--no-network",
+                 "--channel", "stable"],
+                env={**os.environ, "SPXO_PACMAN_CONF": str(conf)},
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("+[omarchy]", out.stdout)
+            self.assertIn("+Server = https://pkgs.omarchy.org/stable/aarch64", out.stdout)
+            # the diff must place the stanza above [core]
+            added = out.stdout.index("+[omarchy]")
+            core = out.stdout.index(" [core]")
+            self.assertLess(added, core)
+            # dry run must not modify the file
+            self.assertNotIn("[omarchy]", conf.read_text(encoding="utf-8"))
+        finally:
+            conf.unlink()
+
+    def test_repo_restore_moves_a_misplaced_stanza_above_core(self):
+        # Bugbot finding on PR #3: a stanza that already existed BELOW [core]
+        # was left where pacman gives it lower precedence. The normalisation
+        # pass must relocate it, not just rewrite its Server line.
+        restore = SOURCE.parent / "spxo-repo-restore"
+        conf = self._fixture()
+        with open(conf, "a", encoding="utf-8") as handle:
+            handle.write("\n[omarchy]\nServer = https://pkgs.omarchy.org/edge/aarch64\n")
+        try:
+            out = subprocess.run(
+                ["bash", str(restore), "--print", "--no-network",
+                 "--channel", "rc"],
+                env={**os.environ, "SPXO_PACMAN_CONF": str(conf)},
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            lines = out.stdout.splitlines()
+            omarchy = [i for i, l in enumerate(lines) if l.strip() == "[omarchy]"]
+            core = [i for i, l in enumerate(lines) if l.strip() == "[core]"]
+            self.assertEqual(len(omarchy), 1, "exactly one stanza, no duplicate")
+            self.assertEqual(len(core), 1, out.stdout)
+            self.assertLess(omarchy[0], core[0], out.stdout)
+            servers = [l for l in lines if l.startswith("Server = https://pkgs.omarchy.org")]
+            self.assertEqual(servers, ["Server = https://pkgs.omarchy.org/rc/aarch64"], out.stdout)
+            # nothing written
+            self.assertIn("pkgs.omarchy.org/edge/aarch64", conf.read_text(encoding="utf-8"))
+        finally:
+            conf.unlink()
+
+    def test_repo_restore_rejects_bad_channel(self):
+        restore = SOURCE.parent / "spxo-repo-restore"
+        conf = self._fixture("[omarchy]\nServer = https://pkgs.omarchy.org/edge/aarch64\n\n")
+        try:
+            bad = subprocess.run(
+                ["bash", str(restore), "--dry-run", "--no-network",
+                 "--channel", "nightly"],
+                env={**os.environ, "SPXO_PACMAN_CONF": str(conf)},
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertIn("unknown channel", bad.stderr)
+        finally:
+            conf.unlink()
+
+    def test_channel_reader_reports_from_pacman_conf_not_mirrorlist(self):
+        reader = SOURCE.parent / "spxo-channel"
+        conf = self._fixture("[omarchy]\nServer = https://pkgs.omarchy.org/stable/aarch64\n\n")
+        try:
+            out = subprocess.run(
+                ["bash", str(reader), "--pacman-conf", str(conf)],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("stable (omarchy", out.stdout)
+            self.assertIn("first repo: omarchy", out.stdout)
+        finally:
+            conf.unlink()
+
+    def test_channel_reader_flags_a_missing_omarchy_stanza(self):
+        reader = SOURCE.parent / "spxo-channel"
+        conf = self._fixture()
+        try:
+            out = subprocess.run(
+                ["bash", str(reader), "--pacman-conf", str(conf)],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 1)
+            self.assertIn("no-channel", out.stdout)
+        finally:
+            conf.unlink()
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]])

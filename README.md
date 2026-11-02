@@ -85,6 +85,18 @@ Safety posture: dry-run is the default; the target disk must be an NVMe
 restricted to loop devices for testing; any missing boot artifact aborts the
 install instead of "succeeding" into a black screen.
 
+## Updating
+
+```sh
+bash installer/spxo-channel             # which channel am I on, and is it first?
+sudo bash installer/spxo-repo-restore   # repair a missing [omarchy] repo
+omarchy update
+```
+
+`docs/install-guide.md` section 7 covers the whole path: channel table, the
+`[omarchy]`-first ordering rule, what an update actually moves, the
+verification list, and how to roll back.
+
 ## Why this exists
 
 The Surface Pro X ships with 8 GB of RAM, and under Windows 11 that is a
@@ -139,11 +151,10 @@ does not ship.
 ## Status & provenance
 
 - Installer validated on-device: Surface Pro X SQ2, linux-surface
-  6.18.3-1-surface+ (aarch64), Omarchy edge/aarch64 repo + arm-mirror
+  6.18.3-1-surface+ (aarch64), Omarchy stable/aarch64 repo + arm-mirror
   (Arch Linux ARM), GRUB arm64-efi.
-- Repo URLs verified live: `pkgs.omarchy.org/edge/aarch64`,
-  `arm-mirror.omarchy.org` (both unsigned DBs; the installer sets
-  `SigLevel = Never` for exactly these two).
+- Repo URLs verified live (2026-11-02): `pkgs.omarchy.org/{stable,rc,edge}/aarch64`
+  and `arm-mirror.omarchy.org` (all unsigned DBs).
 - Roadmap items (hosted USB image) are tracked in the project's spec folder,
   not here.
 
