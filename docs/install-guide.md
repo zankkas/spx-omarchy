@@ -113,7 +113,8 @@ The live env needs:
 Plug in a USB WiFi dongle (rtl8xxxu family is proven). The internal WCN3990
 does not probe on SQ2. Verify reachability of both repos:
 
-- `https://pkgs.omarchy.org/edge/aarch64` (Omarchy, unsigned DB)
+- `https://pkgs.omarchy.org/<channel>/aarch64` (Omarchy, unsigned DB;
+  `channel` = `stable` by default, see `SPXO_CHANNEL` below)
 - `https://arm-mirror.omarchy.org/$arch/$repo` (Arch Linux ARM, unsigned)
 
 ## 4. Run the installer
@@ -127,8 +128,14 @@ Configuration via environment (defaults shown):
 
 ```sh
 SPXO_HOSTNAME=surface-x SPXO_USERNAME=<youruser> SPXO_TIMEZONE=Europe/Berlin \
-SPXO_LOCALE=en_US.UTF-8 SPXO_BT_ADDR= SPXO_KIT=/run/usb/kit
+SPXO_LOCALE=en_US.UTF-8 SPXO_BT_ADDR= SPXO_KIT=/run/usb/kit SPXO_CHANNEL=stable
 ```
+
+`SPXO_CHANNEL` is `stable` (default), `rc` or `edge`. Stable is upstream's own
+default for new installs and the channel this guide is written against. Edge
+tracks development builds and the newest Arch packages, and upstream asks you
+to pick it only if you can recover a system that breaks. An unknown value
+aborts the install instead of silently falling back.
 
 `SPXO_BT_ADDR` is optional: set it only if your WCN399x controller comes up
 without a public address (symptom: `btmgmt info` shows no address). The
@@ -197,9 +204,16 @@ Channels, read from the aarch64 repo databases (2026-11-02):
 | rc | 4.5.0rc3-1 | 0.56.2-7 | 0.3.2.r7.g2b4501a-1 | release candidate |
 | edge | 4.5.0rc3-1 | 0.57.0-2 | 0.3.2.r7.g2b4501a-6 | same RC today, plus newer deps |
 
-The installer ships with `edge`. That is the newest thing upstream publishes,
-but today it is an unreleased RC (`4.5.0rc3`) and the 4.5 shell changes its
-plugin API, so a locally rebuilt bar widget needs rework. Pick knowingly.
+The installer now writes `[omarchy]` into the installed `/etc/pacman.conf`,
+above the Arch Linux ARM repos, on the channel you chose. It used to leave the
+ALARM template in place, which is why systems installed before this change
+could not update their desktop at all. The channel defaults to `stable`,
+upstream's own default for new installs: stable tracks official releases plus an
+Arch mirror held one month behind so upstream can catch config-breaking
+incompatibilities. `edge` tracks development builds and the newest Arch packages
+and is for people who can recover a broken system; today it is the unreleased
+`4.5.0rc3`, whose shell changes its plugin API. Set `SPXO_CHANNEL=edge` (or
+`rc`) at install time if that is what you want.
 
 **Channel reporting is misleading on this install, by design of the upstream
 tool.** `omarchy-version-channel` looks for `stable-mirror.omarchy.org` in

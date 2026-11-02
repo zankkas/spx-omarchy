@@ -45,8 +45,28 @@ class RepositoryTests(unittest.TestCase):
         self.assertNotIn("[local]", SOURCE_TEXT)
 
     def test_pacman_conf_uses_omarchy_and_alarm_mirror(self):
-        self.assertIn("pkgs.omarchy.org/edge/$arch", SOURCE_TEXT)
+        # The channel is a knob (stable by default, upstream's own default for
+        # new installs); base packages always come from Arch Linux ARM.
+        self.assertIn("OMARCHY_CHANNEL=${SPXO_CHANNEL:-stable}", SOURCE_TEXT)
+        self.assertIn("pkgs.omarchy.org/$OMARCHY_CHANNEL/", SOURCE_TEXT)
         self.assertIn("arm-mirror.omarchy.org/$arch/$repo", SOURCE_TEXT)
+        self.assertNotIn("pkgs.omarchy.org/edge/$arch", SOURCE_TEXT)
+
+    def test_unknown_channel_is_refused(self):
+        self.assertRegex(SOURCE_TEXT, r"SPXO_CHANNEL must be stable, rc or edge")
+        self.assertIn("stable|rc|edge", SOURCE_TEXT)
+
+    def test_target_pacman_conf_gets_omarchy_above_core(self):
+        # pacstrap leaves the ALARM pacman.conf, which has no [omarchy] stanza:
+        # the installed system then cannot update Omarchy at all. The chroot
+        # phase must insert it above [core] and the final verify must check it.
+        chroot = SOURCE_TEXT.split("cat > \"$TARGET/root/spxo-configure.sh\"", 1)[1]
+        chroot = chroot.split("\nCHROOT", 1)[0]
+        self.assertIn("[omarchy]", chroot)
+        self.assertRegex(chroot, r"/\^\\\[core\\\]/ && !inserted")
+        self.assertIn("OMARCHY_CHANNEL=$OMARCHY_CHANNEL", SOURCE_TEXT)
+        verify = SOURCE_TEXT.split("12. verification", 1)[1]
+        self.assertIn("grep -q '^\\[omarchy\\]' '$TARGET/etc/pacman.conf'", verify)
 
     def test_network_repos_are_unsigned(self):
         # Both Omarchy's and the ALARM mirror ship unsigned databases.

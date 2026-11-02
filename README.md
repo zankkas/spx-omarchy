@@ -147,11 +147,10 @@ to see exactly how your agent will behave before letting it drive.
 ## Status & provenance
 
 - Installer validated on-device: Surface Pro X SQ2, linux-surface
-  6.18.3-1-surface+ (aarch64), Omarchy edge/aarch64 repo + arm-mirror
+  6.18.3-1-surface+ (aarch64), Omarchy stable/aarch64 repo + arm-mirror
   (Arch Linux ARM), GRUB arm64-efi.
-- Repo URLs verified live: `pkgs.omarchy.org/edge/aarch64`,
-  `arm-mirror.omarchy.org` (both unsigned DBs; the installer sets
-  `SigLevel = Never` for exactly these two).
+- Repo URLs verified live (2026-11-02): `pkgs.omarchy.org/{stable,rc,edge}/aarch64`
+  and `arm-mirror.omarchy.org` (all unsigned DBs).
 - Roadmap items (hosted USB image) are tracked in the project's spec folder,
   not here.
 
