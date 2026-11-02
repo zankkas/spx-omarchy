@@ -479,20 +479,39 @@ class UpdatePathTests(unittest.TestCase):
         finally:
             conf.unlink()
 
-    def test_repo_restore_is_idempotent_and_rejects_bad_channel(self):
+    def test_repo_restore_moves_a_misplaced_stanza_above_core(self):
+        # Bugbot finding on PR #3: a stanza that already existed BELOW [core]
+        # was left where pacman gives it lower precedence. The normalisation
+        # pass must relocate it, not just rewrite its Server line.
         restore = SOURCE.parent / "spxo-repo-restore"
-        conf = self._fixture("[omarchy]\nServer = https://pkgs.omarchy.org/edge/aarch64\n\n")
+        conf = self._fixture()
+        with open(conf, "a", encoding="utf-8") as handle:
+            handle.write("\n[omarchy]\nServer = https://pkgs.omarchy.org/edge/aarch64\n")
         try:
             out = subprocess.run(
-                ["bash", str(restore), "--dry-run", "--no-network",
+                ["bash", str(restore), "--print", "--no-network",
                  "--channel", "rc"],
                 env={**os.environ, "SPXO_PACMAN_CONF": str(conf)},
                 capture_output=True, text=True, timeout=60,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
-            self.assertNotIn("+[omarchy]", out.stdout, "must rewrite, not duplicate")
-            self.assertIn("+Server = https://pkgs.omarchy.org/rc/aarch64", out.stdout)
+            lines = out.stdout.splitlines()
+            omarchy = [i for i, l in enumerate(lines) if l.strip() == "[omarchy]"]
+            core = [i for i, l in enumerate(lines) if l.strip() == "[core]"]
+            self.assertEqual(len(omarchy), 1, "exactly one stanza, no duplicate")
+            self.assertEqual(len(core), 1, out.stdout)
+            self.assertLess(omarchy[0], core[0], out.stdout)
+            servers = [l for l in lines if l.startswith("Server = https://pkgs.omarchy.org")]
+            self.assertEqual(servers, ["Server = https://pkgs.omarchy.org/rc/aarch64"], out.stdout)
+            # nothing written
+            self.assertIn("pkgs.omarchy.org/edge/aarch64", conf.read_text(encoding="utf-8"))
+        finally:
+            conf.unlink()
 
+    def test_repo_restore_rejects_bad_channel(self):
+        restore = SOURCE.parent / "spxo-repo-restore"
+        conf = self._fixture("[omarchy]\nServer = https://pkgs.omarchy.org/edge/aarch64\n\n")
+        try:
             bad = subprocess.run(
                 ["bash", str(restore), "--dry-run", "--no-network",
                  "--channel", "nightly"],

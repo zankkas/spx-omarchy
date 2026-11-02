@@ -17,16 +17,19 @@
 # Usage:
 #   sudo bash spxo-repo-restore                 # stable channel (recommended)
 #   sudo bash spxo-repo-restore --channel rc    # or edge
-#   sudo bash spxo-repo-restore --dry-run       # print the diff, change nothing
+#   bash spxo-repo-restore --dry-run            # print the diff, change nothing
+#   bash spxo-repo-restore --print              # print the resulting conf, change nothing
 #
-# Idempotent: re-running with another channel rewrites the Server line instead
-# of adding a second [omarchy] section.
+# Idempotent and order-enforcing: any existing [omarchy] stanza is removed
+# wherever it sits and re-written directly above [core], so a stanza that was
+# below the Arch repos is moved rather than left with lower precedence.
 
 set -uo pipefail
 
 CONF=${SPXO_PACMAN_CONF:-/etc/pacman.conf}   # override exists for testing only
 CHANNEL=stable
 DRY_RUN=0
+PRINT=0
 CHECK_NETWORK=1
 
 die() { printf 'spxo-repo-restore: %s\n' "$*" >&2; exit 1; }
@@ -39,6 +42,7 @@ while [ $# -gt 0 ]; do
       CHANNEL=$2; shift 2 ;;
     --channel=*) CHANNEL=${1#*=}; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --print) PRINT=1; shift ;;                 # show the normalised conf, write nothing
     --no-network) CHECK_NETWORK=0; shift ;;   # tests / offline inspection
     -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -55,7 +59,7 @@ SERVER="https://pkgs.omarchy.org/$CHANNEL/aarch64"
 [ -r "$CONF" ] || die "$CONF is not readable"
 grep -q '^\[core\]' "$CONF" || die "$CONF has no [core] section - not an ALARM pacman.conf, refusing"
 
-if [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
+if [ "$DRY_RUN" -eq 0 ] && [ "$PRINT" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
   die "needs root: sudo bash $0 --channel $CHANNEL"
 fi
 
@@ -71,29 +75,38 @@ fi
 TMP=$(mktemp) || die "mktemp failed"
 trap 'rm -f "$TMP"' EXIT
 
+# One normalisation pass: drop any existing [omarchy] stanza (wherever it sits)
+# and write a canonical one immediately above [core]. That both fixes the channel
+# and enforces the ordering, so a stanza that exists in the wrong place is moved
+# rather than left where pacman would give it lower precedence.
 if grep -qE '^\[omarchy\]' "$CONF"; then
-  # Rewrite the Server line inside the existing [omarchy] stanza.
-  awk -v server="$SERVER" '
-    /^\[omarchy\]/ { inblock=1; print; next }
-    /^\[/          { inblock=0 }
-    inblock && /^[[:space:]]*Server[[:space:]]*=/ { print "Server = " server; replaced=1; next }
-    { print }
-    END { if (!replaced) exit 3 }
-  ' "$CONF" > "$TMP" || die "could not rewrite the existing [omarchy] section"
-  CHANGE="rewrote [omarchy] Server to $CHANNEL"
+  REWRITE=1
 else
-  awk -v server="$SERVER" '
-    BEGIN { inserted=0 }
-    /^\[core\]/ && !inserted {
-      print "[omarchy]"
-      print "Server = " server
-      print ""
-      inserted=1
-    }
-    { print }
-    END { if (!inserted) exit 4 }
-  ' "$CONF" > "$TMP" || die "could not insert [omarchy] above [core]"
+  REWRITE=0
+fi
+awk -v server="$SERVER" '
+  /^\[omarchy\]/ { skip=1; next }
+  /^\[/          { skip=0 }
+  skip           { next }
+  /^\[core\]/ && !inserted {
+    print "[omarchy]"
+    print "Server = " server
+    print ""
+    inserted=1
+  }
+  { print }
+  END { if (!inserted) exit 4 }
+' "$CONF" > "$TMP" || die "could not place [omarchy] above [core] (no [core] stanza?)"
+
+if [ "$REWRITE" -eq 1 ]; then
+  CHANGE="rewrote [omarchy] for $CHANNEL and moved it above [core]"
+else
   CHANGE="inserted [omarchy] ($CHANNEL) above [core]"
+fi
+
+if [ "$PRINT" -eq 1 ]; then
+  cat "$TMP"
+  exit 0
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then

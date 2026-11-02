@@ -646,22 +646,22 @@ echo "-- repositories: [omarchy] first, so 'omarchy update' can move the desktop
 # omarchy-hyprland-titlebars' hyprland pin. pacman takes a package name from the
 # first repo that carries it, so [omarchy] goes above [core]; the omarchy repo
 # pins hyprland in a way that keeps the titlebars pin satisfied.
-if grep -q '^\[omarchy\]' /etc/pacman.conf; then
-  awk -v server="https://pkgs.omarchy.org/${OMARCHY_CHANNEL}/aarch64" '
-    /^\[omarchy\]/ { inblock = 1; print; next }
-    /^\[/          { inblock = 0 }
-    inblock && /^[[:space:]]*Server[[:space:]]*=/ { print "Server = " server; replaced = 1; next }
-    { print }
-    END { if (!replaced) exit 3 }
-  ' /etc/pacman.conf > /etc/pacman.conf.spxo || { echo "could not rewrite the [omarchy] stanza"; exit 1; }
-else
-  awk -v server="https://pkgs.omarchy.org/${OMARCHY_CHANNEL}/aarch64" '
-    BEGIN { inserted = 0 }
-    /^\[core\]/ && !inserted { print "[omarchy]"; print "Server = " server; print ""; inserted = 1 }
-    { print }
-    END { if (!inserted) exit 4 }
-  ' /etc/pacman.conf > /etc/pacman.conf.spxo || { echo "pacman.conf has no [core] stanza"; exit 1; }
-fi
+# One pass: drop any existing [omarchy] stanza (wherever pacstrap left it) and
+# write a canonical one immediately above [core], so the channel is right AND
+# the ordering is enforced.
+awk -v server="https://pkgs.omarchy.org/${OMARCHY_CHANNEL}/aarch64" '
+  /^\[omarchy\]/ { skip = 1; next }
+  /^\[/          { skip = 0 }
+  skip           { next }
+  /^\[core\]/ && !inserted {
+    print "[omarchy]"
+    print "Server = " server
+    print ""
+    inserted = 1
+  }
+  { print }
+  END { if (!inserted) exit 4 }
+' /etc/pacman.conf > /etc/pacman.conf.spxo || { echo "pacman.conf has no [core] stanza"; exit 1; }
 cat /etc/pacman.conf.spxo > /etc/pacman.conf
 rm -f /etc/pacman.conf.spxo
 grep -q '^\[omarchy\]' /etc/pacman.conf || { echo "[omarchy] stanza missing after the rewrite"; exit 1; }
