@@ -140,9 +140,13 @@ remove after the greeter lists the user.
 → `btmgmt info` shows no controller/address → set `SPXO_BT_ADDR` at install
 or `btmgmt --index 0 public-addr <addr>`; NEVER restart bluetoothd.
 
-### "Update broke the desktop" (Qt/Quick theme collision)
-→ check `~/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision`
-exists and executable; `omarchy update` again with the hook in place.
+### "Update broke the desktop" / "omarchy update does nothing"
+→ `omarchy-channel-current` says `unknown` and `pacman -Qm` lists omarchy
+packages → `/etc/pacman.conf` lost `[omarchy]`: `sudo bash
+installer/spxo-repo-restore` (see install-guide section 7), then `omarchy
+update`. Do NOT add a QtQuick import pin for the old color collision: fixed
+upstream in 4.0.5, and a pin renamed `.disabled` still runs (only `*.sample`
+is skipped).
 
 ### "pacstrap / resolution weirdness" (only for kit builders)
 → real pacman in an arm64 container is the oracle; the failure log of the

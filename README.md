@@ -84,6 +84,18 @@ Safety posture: dry-run is the default; the target disk must be an NVMe
 restricted to loop devices for testing; any missing boot artifact aborts the
 install instead of "succeeding" into a black screen.
 
+## Updating
+
+```sh
+bash installer/spxo-channel             # which channel am I on, and is it first?
+sudo bash installer/spxo-repo-restore   # repair a missing [omarchy] repo
+omarchy update
+```
+
+`docs/install-guide.md` section 7 covers the whole path: channel table, the
+`[omarchy]`-first ordering rule, what an update actually moves, the
+verification list, and how to roll back.
+
 ## Why this exists
 
 The Surface Pro X ships with 8 GB of RAM, and under Windows 11 that is a
