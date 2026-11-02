@@ -82,6 +82,7 @@ TREE="$WORKDIR/iso-tree"
 if [ -d "$TREE" ]; then
   if [ "$FORCE" -eq 1 ]; then
     echo "== removing stale tree =="
+    chmod -R u+w "$TREE" 2>/dev/null || true
     rm -rf "$TREE"
   else
     echo "work tree exists: $TREE (pass --force to rebuild it)"
@@ -90,6 +91,8 @@ if [ -d "$TREE" ]; then
 fi
 echo "== extracting ISO tree to $TREE =="
 xorriso -osirrox on -indev "$IN" -extract / "$TREE" >/dev/null
+# ISO files carry read-only permissions; make the tree writable for patching
+chmod -R u+w "$TREE"
 
 # find the resolved grub.cfg inside the tree (archiso layout)
 GRUB=$(find "$TREE" -name grub.cfg -path '*grub*' | head -1)
@@ -121,8 +124,9 @@ if [ -e "$OUT" ] && [ "$FORCE" -ne 1 ]; then
 fi
 
 echo "== repacking to $OUT =="
-# shellcheck disable=SC2086
-xorriso -as mkisofs $MKISO_OPTS -o "$OUT" "$TREE" >/dev/null
+# eval-split so quoted values in the recorded options parse correctly
+eval "set -- $MKISO_OPTS"
+xorriso -as mkisofs "$@" -o "$OUT" "$TREE" >/dev/null
 
 # ----------------------------------------------------- 5. verify the rebuild
 echo "== verifying rebuilt ISO =="
