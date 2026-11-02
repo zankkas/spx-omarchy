@@ -118,13 +118,25 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn("20-autologin.conf", SOURCE_TEXT)
         self.assertNotIn("Session=hyprland", SOURCE_TEXT)
 
-    def test_pins_qtquick_against_color_collision(self):
-        # omacom/omarchy#14548: Qt 6.12 QtQuick/Color shadows qs.Commons.Color
-        # and the shell menu renders black. The installer must pin the import
-        # in the installed shell tree AND ship the post-update hook.
-        self.assertIn("import QtQuick 6.11", SOURCE_TEXT)
-        self.assertIn("pin-qtquick-color-collision", SOURCE_TEXT)
-        self.assertIn("hooks/post-update.d", SOURCE_TEXT)
+    def test_no_qtquick_import_pin(self):
+        # omacom/omarchy#14548 (Qt 6.12 QtQuick/Color shadowing qs.Commons.Color)
+        # was fixed upstream in #14553 and ships from 4.0.5. Pinning the import
+        # freezes the shell on old QML APIs, so the installer must not do it and
+        # must not ship a post-update hook that re-applies it.
+        self.assertNotIn("import QtQuick 6.11", SOURCE_TEXT)
+        self.assertNotIn("pin-qtquick-color-collision", SOURCE_TEXT)
+
+    def test_omarchy_repo_is_listed_before_the_arch_repos(self):
+        # pacman takes a name from the first repo that carries it. The omarchy
+        # repo pins hyprland, which keeps omarchy-hyprland-titlebars satisfied;
+        # ALARM's newer hyprland aborts the transaction otherwise.
+        conf = SOURCE_TEXT.split("cat > /tmp/spxo-pacman.conf <<EOF", 1)[1]
+        conf = conf.split("\nEOF", 1)[0]
+        order = [line.strip() for line in conf.splitlines() if line.startswith("[")]
+        self.assertLess(order.index("[omarchy]"), order.index("[core]"), order)
+        # and ahead of every other Arch/ALARM repo, not just [core]
+        for repo in ("[core]", "[extra]", "[alarm]", "[aur]"):
+            self.assertLess(order.index("[omarchy]"), order.index(repo), order)
 
     def test_symlink_checks_use_dash_l(self):
         # -e follows absolute unit symlinks into the live environment and
@@ -407,6 +419,98 @@ class LuksTests(unittest.TestCase):
         # and plain /dev/nvme0n1pX entries instead of root UUIDs; the phase-12
         # check must count all device/UUID fstab entries, not just ^UUID=.
         self.assertIn("^(UUID=|/dev/)", SOURCE_TEXT)
+
+class UpdatePathTests(unittest.TestCase):
+    """The two scripts an already-installed machine needs (install-guide 7)."""
+
+    @staticmethod
+    def _fixture(extra_repo=None):
+        conf = (
+            "[options]\nArchitecture = aarch64\nSigLevel = Never\n\n"
+            + (extra_repo or "")
+            + "[core]\nInclude = /etc/pacman.d/mirrorlist\n\n"
+            "[extra]\nInclude = /etc/pacman.d/mirrorlist\n\n"
+            "[alarm]\nInclude = /etc/pacman.d/mirrorlist\n"
+        )
+        handle = tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False)
+        handle.write(conf)
+        handle.close()
+        return Path(handle.name)
+
+    def test_repo_restore_puts_omarchy_first_in_dry_run(self):
+        restore = SOURCE.parent / "spxo-repo-restore"
+        conf = self._fixture()
+        try:
+            out = subprocess.run(
+                ["bash", str(restore), "--dry-run", "--no-network",
+                 "--channel", "stable"],
+                env={**os.environ, "SPXO_PACMAN_CONF": str(conf)},
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("+[omarchy]", out.stdout)
+            self.assertIn("+Server = https://pkgs.omarchy.org/stable/aarch64", out.stdout)
+            # the diff must place the stanza above [core]
+            added = out.stdout.index("+[omarchy]")
+            core = out.stdout.index(" [core]")
+            self.assertLess(added, core)
+            # dry run must not modify the file
+            self.assertNotIn("[omarchy]", conf.read_text(encoding="utf-8"))
+        finally:
+            conf.unlink()
+
+    def test_repo_restore_is_idempotent_and_rejects_bad_channel(self):
+        restore = SOURCE.parent / "spxo-repo-restore"
+        conf = self._fixture("[omarchy]\nServer = https://pkgs.omarchy.org/edge/aarch64\n\n")
+        try:
+            out = subprocess.run(
+                ["bash", str(restore), "--dry-run", "--no-network",
+                 "--channel", "rc"],
+                env={**os.environ, "SPXO_PACMAN_CONF": str(conf)},
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertNotIn("+[omarchy]", out.stdout, "must rewrite, not duplicate")
+            self.assertIn("+Server = https://pkgs.omarchy.org/rc/aarch64", out.stdout)
+
+            bad = subprocess.run(
+                ["bash", str(restore), "--dry-run", "--no-network",
+                 "--channel", "nightly"],
+                env={**os.environ, "SPXO_PACMAN_CONF": str(conf)},
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertIn("unknown channel", bad.stderr)
+        finally:
+            conf.unlink()
+
+    def test_channel_reader_reports_from_pacman_conf_not_mirrorlist(self):
+        reader = SOURCE.parent / "spxo-channel"
+        conf = self._fixture("[omarchy]\nServer = https://pkgs.omarchy.org/stable/aarch64\n\n")
+        try:
+            out = subprocess.run(
+                ["bash", str(reader), "--pacman-conf", str(conf)],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("stable (omarchy", out.stdout)
+            self.assertIn("first repo: omarchy", out.stdout)
+        finally:
+            conf.unlink()
+
+    def test_channel_reader_flags_a_missing_omarchy_stanza(self):
+        reader = SOURCE.parent / "spxo-channel"
+        conf = self._fixture()
+        try:
+            out = subprocess.run(
+                ["bash", str(reader), "--pacman-conf", str(conf)],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 1)
+            self.assertIn("no-channel", out.stdout)
+        finally:
+            conf.unlink()
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]])

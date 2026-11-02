@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# spxo-repo-restore: give an already-installed Surface Pro X Omarchy system the
+# [omarchy] repository, ahead of the Arch Linux ARM repos, so `omarchy update`
+# can actually move the desktop.
+#
+# Symptom this fixes:
+#   omarchy-channel-current         -> unknown
+#   pacman -Qm                      -> omarchy, omarchy-settings, hyprland, quickshell all foreign
+#   pacman -Syu                     -> "installing hyprland (0.57.0-1) breaks dependency
+#                                      'hyprland=0.56.2' required by omarchy-hyprland-titlebars"
+#
+# Why [omarchy] goes first: pacman takes a name from the first repo that carries
+# it, regardless of version. The Omarchy repo pins hyprland (0.56.2-7 on stable),
+# which keeps omarchy-hyprland-titlebars' exact pin satisfied while ALARM would
+# hand out a newer hyprland and abort the transaction.
+#
+# Usage:
+#   sudo bash spxo-repo-restore                 # stable channel (recommended)
+#   sudo bash spxo-repo-restore --channel rc    # or edge
+#   sudo bash spxo-repo-restore --dry-run       # print the diff, change nothing
+#
+# Idempotent: re-running with another channel rewrites the Server line instead
+# of adding a second [omarchy] section.
+
+set -uo pipefail
+
+CONF=${SPXO_PACMAN_CONF:-/etc/pacman.conf}   # override exists for testing only
+CHANNEL=stable
+DRY_RUN=0
+CHECK_NETWORK=1
+
+die() { printf 'spxo-repo-restore: %s\n' "$*" >&2; exit 1; }
+say() { printf '== %s\n' "$*"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --channel)
+      [ $# -ge 2 ] || die "--channel needs a value (stable|rc|edge)"
+      CHANNEL=$2; shift 2 ;;
+    --channel=*) CHANNEL=${1#*=}; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --no-network) CHECK_NETWORK=0; shift ;;   # tests / offline inspection
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+
+case "$CHANNEL" in
+  stable|rc|edge) ;;
+  *) die "unknown channel '$CHANNEL' (expected stable, rc or edge)" ;;
+esac
+
+SERVER="https://pkgs.omarchy.org/$CHANNEL/aarch64"
+
+[ -r "$CONF" ] || die "$CONF is not readable"
+grep -q '^\[core\]' "$CONF" || die "$CONF has no [core] section - not an ALARM pacman.conf, refusing"
+
+if [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
+  die "needs root: sudo bash $0 --channel $CHANNEL"
+fi
+
+# Reachability check before touching anything: a repo whose DB 404s turns every
+# later pacman -Sy into a hard failure on an otherwise working system.
+if [ "$CHECK_NETWORK" -eq 1 ]; then
+  say "checking $SERVER/omarchy.db"
+  code=$(curl -sS -A 'pacman/7.0' -o /dev/null -w '%{http_code}' --max-time 30 "$SERVER/omarchy.db" 2>/dev/null || echo 000)
+  [ "$code" = "200" ] || die "$SERVER/omarchy.db answered HTTP $code - channel not usable, nothing changed"
+  say "  reachable (HTTP 200)"
+fi
+
+TMP=$(mktemp) || die "mktemp failed"
+trap 'rm -f "$TMP"' EXIT
+
+if grep -qE '^\[omarchy\]' "$CONF"; then
+  # Rewrite the Server line inside the existing [omarchy] stanza.
+  awk -v server="$SERVER" '
+    /^\[omarchy\]/ { inblock=1; print; next }
+    /^\[/          { inblock=0 }
+    inblock && /^[[:space:]]*Server[[:space:]]*=/ { print "Server = " server; replaced=1; next }
+    { print }
+    END { if (!replaced) exit 3 }
+  ' "$CONF" > "$TMP" || die "could not rewrite the existing [omarchy] section"
+  CHANGE="rewrote [omarchy] Server to $CHANNEL"
+else
+  awk -v server="$SERVER" '
+    BEGIN { inserted=0 }
+    /^\[core\]/ && !inserted {
+      print "[omarchy]"
+      print "Server = " server
+      print ""
+      inserted=1
+    }
+    { print }
+    END { if (!inserted) exit 4 }
+  ' "$CONF" > "$TMP" || die "could not insert [omarchy] above [core]"
+  CHANGE="inserted [omarchy] ($CHANNEL) above [core]"
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  say "dry run - diff against $CONF (no changes written)"
+  diff -u "$CONF" "$TMP" || true
+  exit 0
+fi
+
+BACKUP="$CONF.bak.$(date +%Y%m%d-%H%M%S)"
+cp -a "$CONF" "$BACKUP" || die "backup to $BACKUP failed"
+say "backup: $BACKUP"
+
+install -m 0644 "$TMP" "$CONF" || { cp -a "$BACKUP" "$CONF"; die "install failed, restored $BACKUP"; }
+say "$CHANGE"
+
+# Order is the whole point, prove it rather than assume it.
+first_repo=$(pacman-conf --config "$CONF" --repo-list 2>/dev/null | head -1)
+[ "$first_repo" = "omarchy" ] || { cp -a "$BACKUP" "$CONF"; die "[omarchy] is not the first repo (got '$first_repo'); reverted"; }
+say "repo order: $(pacman-conf --config "$CONF" --repo-list 2>/dev/null | tr '\n' ' ')"
+
+say "syncing package databases"
+pacman -Syy || die "pacman -Syy failed - inspect $CONF against $BACKUP"
+
+if command -v omarchy-channel-current >/dev/null 2>&1; then
+  say "omarchy-channel-current: $(omarchy-channel-current 2>/dev/null || echo '(failed)')"
+fi
+
+pending=$(pacman -Qu 2>/dev/null | wc -l | tr -d ' ')
+say "pending upgrades: $pending"
+say "next: omarchy update   (interactive; keep the confirmation prompt)"

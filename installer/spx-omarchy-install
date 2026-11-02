@@ -637,30 +637,13 @@ echo "-- mDNS + shell color pin (autologin deliberately NOT configured)"
 mkdir -p /etc/sddm.conf.d
 systemctl enable --now avahi-daemon 2>/dev/null || systemctl enable avahi-daemon
 
-echo "-- pin QtQuick imports against the Qt 6.12 Color collision (omacom/omarchy#14548)"
-# Qt 6.12 ships a built-in QtQuick/Color singleton that shadows the shell's
-# qs.Commons.Color, rendering the menu as a black overlay with broken content.
-if [ -d /usr/share/omarchy/shell ]; then
-  for f in $(grep -rlE '\bColor\.' /usr/share/omarchy/shell --include=*.qml); do
-    grep -qE '^\s*import QtQuick\s*$' "$f" &&
-      sed -i -E 's/^([[:space:]]*)import QtQuick[[:space:]]*$/\1import QtQuick 6.11/' "$f"
-  done
-fi
-# Post-update hook: omarchy update replaces /usr/share/omarchy; re-pin after.
-UHOME=$(getent passwd "${USERNAME_}" | cut -d: -f6)
-mkdir -p "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d"
-cat > "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision" <<'EOF2'
-#!/bin/bash
-# Workaround for omacom/omarchy#14548 (Qt 6.12 QtQuick/Color shadows
-# qs.Commons.Color). Remove once installed Omarchy includes upstream #14553.
-cd /usr/share/omarchy
-for f in $(grep -rlE '\bColor\.' shell --include=*.qml); do
-  grep -qE '^\s*import QtQuick\s*$' "$f" &&
-    sudo sed -i -E 's/^([[:space:]]*)import QtQuick[[:space:]]*$/\1import QtQuick 6.11/' "$f"
-done
-EOF2
-chmod 0755 "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision"
-chown -R "${USERNAME_}:${USERNAME_}" "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks" 2>/dev/null || true
+echo "-- Omarchy shell: no QtQuick import pin (upstream fix ships from 4.0.5)"
+# omacom/omarchy#14548 was Qt 6.12's built-in QtQuick/Color singleton shadowing
+# qs.Commons.Color. Older installers rewrote the bare QtQuick import to a pinned
+# 6.11 import and dropped a post-update hook that re-applied it. Upstream fixed
+# it properly in #14553 (palette refs qualified as Commons.Color) and every
+# channel we install ships zero unqualified refs, so the pin is gone: it only
+# froze the shell on older QML APIs. Do not reintroduce it.
 
 echo "-- mask the phantom TPM units (90s boot stall on this device)"
 systemctl mask dev-tpm0.device dev-tpmrm0.device
