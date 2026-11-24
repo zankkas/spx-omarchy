@@ -21,8 +21,12 @@ pkg-defaults composer does. Every package is verified resolvable
 
 ## Repositories
 
-- `[omarchy]`: `https://pkgs.omarchy.org/edge/aarch64` (unsigned DB, so
-  `SigLevel = Never`).
+- `[omarchy]`: `https://pkgs.omarchy.org/<channel>/aarch64` (unsigned DB, so
+  `SigLevel = Never`), channel from `SPXO_CHANNEL`, default `stable`. Written
+  into the target's `/etc/pacman.conf` ABOVE `[core]`: pacman takes a name from
+  the first repo that carries it, and the omarchy repo pins `hyprland` in a way
+  that keeps `omarchy-hyprland-titlebars` satisfied. Leaving the ALARM template
+  in place is what made pre-2026-11 installs unable to update Omarchy.
 - `[core]/[extra]/[alarm]/[aur]`: via `https://arm-mirror.omarchy.org`
   (unsigned DB).
 - `[surface]`: local file repo built from the kit's linux-surface packages

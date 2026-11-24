@@ -1,7 +1,7 @@
 # spx-omarchy: Omarchy on the Surface Pro X
 
 Scripted, reproducible **Omarchy (Hyprland + Wayland) for the Surface Pro X**
-(SQ1/SQ2, ARM64). An installer that stops rather than guesses, 47 regression
+(SQ1/SQ2, ARM64). An installer that stops rather than guesses, 55 regression
 tests, and an agent skill that drives the whole path.
 
 ## The short version
@@ -39,8 +39,8 @@ is written.
 
 ## Do it yourself
 
-The full manual path, with screenshots of the gates and the stage-1 detail, is
-in [`docs/install-guide.md`](docs/install-guide.md). The order:
+The full manual path, with the stage-1 detail and the gates, is in
+[`docs/install-guide.md`](docs/install-guide.md). The order:
 
 1. **Assemble the recovery kit** (one-time). Either capture it from a temporary
    linux-surface install, or run `installer/spxo-prep` on any host — macOS,
@@ -65,6 +65,22 @@ that is not the boot media or removable; overrides are restricted to loop
 devices for testing; a missing boot artifact aborts the install instead of
 "succeeding" into a black screen.
 
+## Updating
+
+The install pulls from one Omarchy channel, `stable` by default, and the
+`[omarchy]` repo must stay first in `pacman.conf` — a hyprland pin can abort the
+next upgrade if it is not.
+
+```sh
+bash installer/spxo-channel             # which channel am I on, and is it first?
+sudo bash installer/spxo-repo-restore   # repair a missing or misplaced [omarchy] repo
+omarchy update
+```
+
+[`docs/install-guide.md`](docs/install-guide.md) section 7 has the channel table,
+the ordering rule, what an update moves, the verification list, and the rollback
+path.
+
 ## Why it is hard
 
 The stock path does not work here. The internal WiFi does not probe, the Type
@@ -80,16 +96,22 @@ pacstrap from the Omarchy AArch64 repository plus Arch Linux ARM mirrors. The
 Omarchy `linux-aarch64` kernel and Limine boot path are deliberately not used;
 they do not work on SQ2.
 
+The point is not rescuing a machine Microsoft dropped. It runs a full Hyprland
+desktop in a fraction of that memory, and a local LLM — unthinkable under
+Windows 11 on this hardware.
+
 ## Verified on
 
 - Surface Pro X **SQ2**, linux-surface 6.18.3-1-surface+ (aarch64), Omarchy
-  edge/aarch64 repository + arm-mirror (Arch Linux ARM), GRUB arm64-efi. In daily
-  service.
-- **47/47 regression tests pass.** They run the installer's logic against real
+  stable/aarch64 repository + arm-mirror (Arch Linux ARM), GRUB arm64-efi. In
+  daily service.
+- **55 regression tests.** They run the installer's logic against real
   assertions, so a regression shows up as a failure rather than a bad install.
-- Repository URLs verified live: `pkgs.omarchy.org/edge/aarch64` and
-  `arm-mirror.omarchy.org` (both unsigned DBs; the installer sets
-  `SigLevel = Never` for exactly these two).
+  They run on a host with `bash` and `pacman-conf` (the channel-reader test
+  needs the latter; macOS lacks it).
+- Repository URLs verified live (2026-11-02):
+  `pkgs.omarchy.org/{stable,rc,edge}/aarch64` and `arm-mirror.omarchy.org` (all
+  unsigned DBs; the installer sets `SigLevel = Never` for exactly these).
 
 **Honest caveats.** LUKS is experimental: three fully verified LUKS installs on
 SQ2 produced a dark first boot, a firmware-class early-console wall. The
@@ -103,8 +125,9 @@ building it.
 ## When it breaks
 
 `docs/known-issues.md` carries the symptom-first tables: dead keyboard, dark
-boot, no WiFi, SDDM login loop, missing Bluetooth address, pacstrap surprises.
-The same trees are inside the skill, so an agent can work them with you.
+boot, no WiFi, SDDM login loop, missing Bluetooth address, pacstrap surprises,
+and a broken `[omarchy]` repo after an update. The same trees are inside the
+skill, so an agent can work them with you.
 
 ## Credits
 

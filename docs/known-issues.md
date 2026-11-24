@@ -56,10 +56,19 @@ Symptom-first. Each entry: what you see → cause → fix. The agent skill
 - Fix: bind-mount the live env's `/dev` wholesale into the target before
   grub-mkconfig (the installer does this; relevant if you hand-roll).
 
-## 8. Qt/Quick theme collision after Omarchy updates
-- **Fix:** the installer wires a version-pin hook under
-  `~/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision`. Verify
-  it still runs after `omarchy update`.
+## 8. Qt/Quick theme collision after Omarchy updates (fixed upstream)
+- **Cause:** Qt 6.12's built-in `QtQuick/Color` singleton shadowed
+  `qs.Commons.Color`, so the shell menu rendered as a black overlay.
+- **Do not fix it with an import pin.** Upstream fixed it in omacom/omarchy
+  #14553 (palette references qualified as `Commons.Color`), shipped from 4.0.5.
+  Every channel here carries zero unqualified `Color.` references, so a
+  `pin-qtquick-color-collision` hook only freezes the shell on old QML APIs.
+- If an old install still carries that hook, move it out of
+  `~/.config/omarchy/hooks/post-update.d/`. Renaming it `.disabled` does not
+  stop it: `omarchy-hook` skips only `*.sample`.
+- Check the shipped tree with a negative lookbehind, not `\bColor\.`:
+  `grep -rlP '(?<!Commons\.)(?<![A-Za-z0-9_.])Color\.' /usr/share/omarchy/shell --include=*.qml`
+  must print nothing.
 
 ## 9. pacstrap pulls huge unexpected firmware families
 - `linux-firmware` is a meta that drags a 12-way split (~300 MB, NVIDIA

@@ -113,7 +113,8 @@ The live env needs:
 Plug in a USB WiFi dongle (rtl8xxxu family is proven). The internal WCN3990
 does not probe on SQ2. Verify reachability of both repos:
 
-- `https://pkgs.omarchy.org/edge/aarch64` (Omarchy, unsigned DB)
+- `https://pkgs.omarchy.org/<channel>/aarch64` (Omarchy, unsigned DB;
+  `channel` = `stable` by default, see `SPXO_CHANNEL` below)
 - `https://arm-mirror.omarchy.org/$arch/$repo` (Arch Linux ARM, unsigned)
 
 ## 4. Run the installer
@@ -127,8 +128,14 @@ Configuration via environment (defaults shown):
 
 ```sh
 SPXO_HOSTNAME=surface-x SPXO_USERNAME=<youruser> SPXO_TIMEZONE=Europe/Berlin \
-SPXO_LOCALE=en_US.UTF-8 SPXO_BT_ADDR= SPXO_KIT=/run/usb/kit
+SPXO_LOCALE=en_US.UTF-8 SPXO_BT_ADDR= SPXO_KIT=/run/usb/kit SPXO_CHANNEL=stable
 ```
+
+`SPXO_CHANNEL` is `stable` (default), `rc` or `edge`. Stable is upstream's own
+default for new installs and the channel this guide is written against. Edge
+tracks development builds and the newest Arch packages, and upstream asks you
+to pick it only if you can recover a system that breaks. An unknown value
+aborts the install instead of silently falling back.
 
 `SPXO_BT_ADDR` is optional: set it only if your WCN399x controller comes up
 without a public address (symptom: `btmgmt info` shows no address). The
@@ -155,10 +162,96 @@ omarchy-provision-first-run
 - If SDDM rejects a correct password: the empty-username trap, see
   known-issues #4.
 - Run `omarchy update` once and verify no failed units.
-- If a Qt color/theme collision appears after updates, the installer already
-  wired a pin hook under `~/.config/omarchy/hooks/post-update.d/`.
+- Do not add a Qt/Quick import pin. Upstream fixed the Qt 6.12 `Color`
+  collision in 4.0.5 (omacom/omarchy#14553); every channel here ships zero
+  unqualified palette refs, so pinning `import QtQuick` only freezes the
+  shell on old QML APIs. Older guides told you to add
+  `post-update.d/pin-qtquick-color-collision`; do not.
 
-## 7. When it doesn't work
+## 7. Updating an existing install
+
+Symptom of a broken update path:
+
+```sh
+omarchy-channel-current            # unknown
+pacman -Qm | grep -c omarchy       # every omarchy package listed as foreign
+pacman -Syu                        # breaks dependency 'hyprland=0.56.2'
+                                   # required by omarchy-hyprland-titlebars
+```
+
+`/etc/pacman.conf` lost its `[omarchy]` section, so `omarchy update` can only
+move Arch Linux ARM packages. Restoring the section first is the whole fix.
+
+```sh
+bash installer/spxo-repo-restore --dry-run    # show the diff, change nothing
+sudo bash installer/spxo-repo-restore         # stable channel
+sudo bash installer/spxo-repo-restore --channel rc   # or edge, if you meant it
+omarchy update                                # interactive; keep the prompt
+```
+
+The restore script backs up `/etc/pacman.conf`, refuses a channel whose
+`omarchy.db` does not answer, proves `[omarchy]` ended up **first**, then
+runs `pacman -Syy`. Order matters: pacman takes a name from the first repo
+that carries it, and the Omarchy repo pins `hyprland` (0.56.2-7) in a way
+that keeps `omarchy-hyprland-titlebars` satisfied, while Arch Linux ARM
+hands out 0.57.0 and aborts the whole transaction.
+
+Channels, read from the aarch64 repo databases (2026-11-02):
+
+| channel | omarchy | hyprland | quickshell | notes |
+|---|---|---|---|---|
+| stable | 4.0.6-1 | 0.56.2-7 | 0.3.2.r7.g2b4501a-1 | daily-driver target |
+| rc | 4.5.0rc3-1 | 0.56.2-7 | 0.3.2.r7.g2b4501a-1 | release candidate |
+| edge | 4.5.0rc3-1 | 0.57.0-2 | 0.3.2.r7.g2b4501a-6 | same RC today, plus newer deps |
+
+The installer now writes `[omarchy]` into the installed `/etc/pacman.conf`,
+above the Arch Linux ARM repos, on the channel you chose. It used to leave the
+ALARM template in place, which is why systems installed before this change
+could not update their desktop at all. The channel defaults to `stable`,
+upstream's own default for new installs: stable tracks official releases plus an
+Arch mirror held one month behind so upstream can catch config-breaking
+incompatibilities. `edge` tracks development builds and the newest Arch packages
+and is for people who can recover a broken system; today it is the unreleased
+`4.5.0rc3`, whose shell changes its plugin API. Set `SPXO_CHANNEL=edge` (or
+`rc`) at install time if that is what you want.
+
+**Channel reporting is misleading on this install, by design of the upstream
+tool.** `omarchy-version-channel` looks for `stable-mirror.omarchy.org` in
+`/etc/pacman.d/mirrorlist`; ARM installs keep that file on Arch Linux ARM, so
+it reports `unknown / stable` and `omarchy-channel-current` prints `unknown`.
+Use the repo's own reader instead:
+
+```sh
+bash installer/spxo-channel
+# stable (omarchy 4.0.6-1, server https://pkgs.omarchy.org/stable/aarch64,
+#         first repo: omarchy)
+```
+
+**Post-update hooks: only `*.sample` is skipped.** `omarchy-hook` runs
+`~/.config/omarchy/hooks/post-update.d/*` and skips files ending in
+`.sample` - nothing else. Renaming a hook to `.disabled` or `.hook.off`
+still runs it. Retire a hook by moving it out of the directory.
+
+An update from 4.0.4 to 4.0.6 moved 175 packages and ran 14 migrations. Do
+this on AC power, then verify:
+
+```sh
+pacman -Q omarchy omarchy-settings         # 4.0.6-1, 4.0.6-1
+bash installer/spxo-channel                # channel + first repo
+pacman -Qu | wc -l                         # 0
+systemctl --failed                         # empty
+dkms status                                # linux-surface modules still built
+nmcli device status                        # wifi up
+omarchy restart shell                      # then look at the bar
+hyprctl configerrors                       # run inside the session, must be empty
+```
+
+Roll back from a TTY if the desktop does not come back: `pacman -U` the
+cached `omarchy` and `omarchy-settings` packages, restore
+`/etc/pacman.conf.bak.*`, and `git reset --hard` the `~/.config/hypr` and
+`~/.config/omarchy` repos to the tag you made before updating.
+
+## 8. When it doesn't work
 
 Give the `skills/surface-pro-x-omarchy/SKILL.md` decision trees to your AI
 agent and work the symptom. The installer also drops a report

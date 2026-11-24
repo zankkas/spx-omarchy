@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# spxo-channel: report which Omarchy channel this install actually pulls from.
+#
+# Why this exists: upstream's `omarchy-channel-current` reads
+# /etc/pacman.d/mirrorlist for Omarchy's own Arch mirrors
+# (stable-mirror.omarchy.org and friends). Those are x86_64 only, so on an
+# ARM install the base repos must stay on Arch Linux ARM and the mirrorlist
+# carries no Omarchy URL. Upstream then prints `unknown`, which reads like a
+# broken install when it is not.
+#
+# This answers the same question from the package repo that is actually
+# configured, and adds the installed version so a stale install is visible.
+#
+# Usage: spxo-channel [--pacman-conf PATH]   (no root needed)
+
+set -uo pipefail
+
+CONF=/etc/pacman.conf
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pacman-conf) CONF=$2; shift 2 ;;
+    --pacman-conf=*) CONF=${1#*=}; shift ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    *) echo "spxo-channel: unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+[ -r "$CONF" ] || { echo "spxo-channel: cannot read $CONF" >&2; exit 1; }
+
+server=$(awk '
+  /^\[omarchy\]/ { inblock=1; next }
+  /^\[/          { inblock=0 }
+  inblock && /^[[:space:]]*Server[[:space:]]*=/ { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }
+' "$CONF")
+
+if [ -z "$server" ]; then
+  echo "no-channel: $CONF has no usable [omarchy] stanza (omarchy update cannot move the desktop)"
+  exit 1
+fi
+
+channel=$(printf '%s\n' "$server" | sed -n 's#.*pkgs\.omarchy\.org/\([a-z]*\)/.*#\1#p')
+[ -n "$channel" ] || channel="unrecognised"
+
+version=$(pacman -Q omarchy 2>/dev/null | awk '{print $2}')
+[ -n "$version" ] || version="not-installed"
+
+first_repo=$(pacman-conf --config "$CONF" --repo-list 2>/dev/null | head -1)
+
+echo "$channel (omarchy $version, server $server, first repo: ${first_repo:-unknown})"
+
+if [ "$first_repo" != "omarchy" ]; then
+  echo "warning: [omarchy] is not the first repo; a hyprland pin can abort the next upgrade" >&2
+  exit 1
+fi

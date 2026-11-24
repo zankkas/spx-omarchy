@@ -17,7 +17,8 @@
 # (SPXO_KIT or a kit/ sibling of this script).
 #
 # Sources:
-#   - Omarchy packages:  https://pkgs.omarchy.org/edge/aarch64 (unsigned DB)
+#   - Omarchy packages:  https://pkgs.omarchy.org/<channel>/aarch64 (unsigned DB,
+#                        channel = SPXO_CHANNEL, default stable)
 #   - Arch Linux ARM:    https://arm-mirror.omarchy.org/$arch/$repo (unsigned DB)
 #   - Surface kernel:    kit packages (linux-surface (see docs/ for the version this was validated with)), local file repo
 #
@@ -37,7 +38,16 @@ CRYPTROOT=cryptroot
 NVME="${SPXO_TARGET_DISK:-/dev/nvme0n1}"
 TARGET=/target
 KIT="${SPXO_KIT:-}"
-OMARCHY_REPO='https://pkgs.omarchy.org/edge/$arch'
+OMARCHY_CHANNEL=${SPXO_CHANNEL:-stable}
+case "$OMARCHY_CHANNEL" in
+  stable|rc|edge) ;;
+  *) echo "SPXO_CHANNEL must be stable, rc or edge (got '$OMARCHY_CHANNEL')" >&2; exit 2 ;;
+esac
+# stable is upstream's own default for new installs and the channel this repo's
+# guide is validated against. edge tracks development builds plus the newest
+# Arch packages and is only for people who can recover a broken system; this
+# device has no snapshots to roll back to.
+OMARCHY_REPO="https://pkgs.omarchy.org/$OMARCHY_CHANNEL/\$arch"
 ALARM_MIRROR='https://arm-mirror.omarchy.org/$arch/$repo'
 MODE="--dry-run"
 MODE="--dry-run"; LUKS=0
@@ -239,7 +249,7 @@ spx-omarchy-install DRY RUN - no target disk, kit, or network files are modified
     core additions                  base, sudo, grub, linux-surface(+headers), networkmanager, bluez-utils, efibootmgr
     composed set                    $(read_pkg_list "$PKG_LISTS/omarchy-base.packages" "$PKG_LISTS/omarchy-aarch64.packages" "$PKG_LISTS/omarchy-aarch64-qualcomm.packages" | sort | tr '\n' ' ')
 
-  repositories     [omarchy] $OMARCHY_REPO   (network, unsigned)
+  repositories     [omarchy] $OMARCHY_REPO   (network, unsigned, channel $OMARCHY_CHANNEL)
                    [core]/[extra]/[alarm]/[aur] via $ALARM_MIRROR  (network, unsigned)
                    [surface] file repo built from the kit's linux-surface packages
   package source   $([ "$OFFLINE" -eq 1 ] && { [ -n "$OFFLINE_TAR" ] && echo "OFFLINE - omarchy-pkgcache.tar in the kit (extracted onto the target during install, no network needed)" || echo "OFFLINE - omarchy-pkgcache in the kit ($(ls "$OFFLINE_DIR/pkg" | wc -l | tr -d ' ') packages, no network needed)"; } || echo "ONLINE - fetched from the mirrors")
@@ -338,7 +348,7 @@ check_repo() {
     || die "cannot reach $label ($url) - connect the USB Wi-Fi dongle and retry"
   echo "OK   $label reachable"
 }
-check_repo "https://pkgs.omarchy.org/edge/aarch64/omarchy.db" "Omarchy aarch64 repo"
+check_repo "https://pkgs.omarchy.org/$OMARCHY_CHANNEL/aarch64/omarchy.db" "Omarchy $OMARCHY_CHANNEL aarch64 repo"
 check_repo "https://arm-mirror.omarchy.org/aarch64/core/core.db" "ALARM mirror core"
 fi
 
@@ -495,7 +505,7 @@ else
   echo "ONLINE MODE - packages will be fetched from the mirrors"
 fi
 
-OMARCHY_SERVER='https://pkgs.omarchy.org/edge/$arch'
+OMARCHY_SERVER="https://pkgs.omarchy.org/$OMARCHY_CHANNEL/\$arch"
 ALARM_SERVER='https://arm-mirror.omarchy.org/$arch/$repo'
 if [ "$OFFLINE" -eq 1 ]; then
   # All repos resolve from the local cache dir; the DBs are staged there as
@@ -599,6 +609,7 @@ TIMEZONE_=$TIMEZONE_
 LOCALE_=$LOCALE_
 BT_ADDR_=$BT_ADDR_
 SWAP_MB=$SWAP_MB
+OMARCHY_CHANNEL=$OMARCHY_CHANNEL
 EOF
 
 cat > "$TARGET/root/spxo-configure.sh" <<'CHROOT'
@@ -628,6 +639,34 @@ else
   echo "warn: visudo absent - check /etc/sudoers.d/10-wheel by hand"
 fi
 
+echo "-- repositories: [omarchy] first, so 'omarchy update' can move the desktop"
+# pacstrap installs the ALARM pacman.conf, which has no [omarchy] stanza. Without
+# this the installed system cannot update Omarchy at all: every omarchy package
+# is foreign, omarchy-channel-current answers unknown, and pacman -Syu aborts on
+# omarchy-hyprland-titlebars' hyprland pin. pacman takes a package name from the
+# first repo that carries it, so [omarchy] goes above [core]; the omarchy repo
+# pins hyprland in a way that keeps the titlebars pin satisfied.
+# One pass: drop any existing [omarchy] stanza (wherever pacstrap left it) and
+# write a canonical one immediately above [core], so the channel is right AND
+# the ordering is enforced.
+awk -v server="https://pkgs.omarchy.org/${OMARCHY_CHANNEL}/aarch64" '
+  /^\[omarchy\]/ { skip = 1; next }
+  /^\[/          { skip = 0 }
+  skip           { next }
+  /^\[core\]/ && !inserted {
+    print "[omarchy]"
+    print "Server = " server
+    print ""
+    inserted = 1
+  }
+  { print }
+  END { if (!inserted) exit 4 }
+' /etc/pacman.conf > /etc/pacman.conf.spxo || { echo "pacman.conf has no [core] stanza"; exit 1; }
+cat /etc/pacman.conf.spxo > /etc/pacman.conf
+rm -f /etc/pacman.conf.spxo
+grep -q '^\[omarchy\]' /etc/pacman.conf || { echo "[omarchy] stanza missing after the rewrite"; exit 1; }
+echo "   [omarchy] -> https://pkgs.omarchy.org/${OMARCHY_CHANNEL}/aarch64 (first repo: $(awk '/^\[/{gsub(/[\[\]]/,""); print; exit}' /etc/pacman.conf))"
+
 echo "-- services (sddm + the Hyprland session via uwsm; no GNOME login)"
 systemctl enable NetworkManager
 systemctl enable sddm
@@ -637,30 +676,13 @@ echo "-- mDNS + shell color pin (autologin deliberately NOT configured)"
 mkdir -p /etc/sddm.conf.d
 systemctl enable --now avahi-daemon 2>/dev/null || systemctl enable avahi-daemon
 
-echo "-- pin QtQuick imports against the Qt 6.12 Color collision (omacom/omarchy#14548)"
-# Qt 6.12 ships a built-in QtQuick/Color singleton that shadows the shell's
-# qs.Commons.Color, rendering the menu as a black overlay with broken content.
-if [ -d /usr/share/omarchy/shell ]; then
-  for f in $(grep -rlE '\bColor\.' /usr/share/omarchy/shell --include=*.qml); do
-    grep -qE '^\s*import QtQuick\s*$' "$f" &&
-      sed -i -E 's/^([[:space:]]*)import QtQuick[[:space:]]*$/\1import QtQuick 6.11/' "$f"
-  done
-fi
-# Post-update hook: omarchy update replaces /usr/share/omarchy; re-pin after.
-UHOME=$(getent passwd "${USERNAME_}" | cut -d: -f6)
-mkdir -p "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d"
-cat > "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision" <<'EOF2'
-#!/bin/bash
-# Workaround for omacom/omarchy#14548 (Qt 6.12 QtQuick/Color shadows
-# qs.Commons.Color). Remove once installed Omarchy includes upstream #14553.
-cd /usr/share/omarchy
-for f in $(grep -rlE '\bColor\.' shell --include=*.qml); do
-  grep -qE '^\s*import QtQuick\s*$' "$f" &&
-    sudo sed -i -E 's/^([[:space:]]*)import QtQuick[[:space:]]*$/\1import QtQuick 6.11/' "$f"
-done
-EOF2
-chmod 0755 "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks/post-update.d/pin-qtquick-color-collision"
-chown -R "${USERNAME_}:${USERNAME_}" "${UHOME:-/home/${USERNAME_}}/.config/omarchy/hooks" 2>/dev/null || true
+echo "-- Omarchy shell: no QtQuick import pin (upstream fix ships from 4.0.5)"
+# omacom/omarchy#14548 was Qt 6.12's built-in QtQuick/Color singleton shadowing
+# qs.Commons.Color. Older installers rewrote the bare QtQuick import to a pinned
+# 6.11 import and dropped a post-update hook that re-applied it. Upstream fixed
+# it properly in #14553 (palette refs qualified as Commons.Color) and every
+# channel we install ships zero unqualified refs, so the pin is gone: it only
+# froze the shell on older QML APIs. Do not reintroduce it.
 
 echo "-- patch omarchy-pkg-add: AUR fallback for Omarchy menu installs"
 # Upstream routes many Omarchy menu entries (VS Code, Zed, ChatGPT, Spotify,
@@ -1048,6 +1070,8 @@ chk "Qualcomm firmware installed" \
     "[ -d '$TARGET/usr/lib/firmware/qcom' ]"
 chk "omarchy runtime installed" \
     "[ -e '$TARGET/usr/bin/omarchy' ]"
+chk "the target pacman.conf carries [omarchy] (without it the install cannot update)" \
+    "grep -q '^\[omarchy\]' '$TARGET/etc/pacman.conf'"
 chk "Surface kernel package installed" \
     "[ -d '$TARGET/usr/lib/modules' ] && find '$TARGET/usr/lib/modules' -maxdepth 1 -type d -name '6.*-surface*' | grep -q ."
 [ "$FAIL" -eq 0 ] || fail_closed "one or more verification checks failed"
