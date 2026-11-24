@@ -124,6 +124,13 @@ if [ -e "$OUT" ] && [ "$FORCE" -ne 1 ]; then
 fi
 
 echo "== repacking to $OUT =="
+# The recorded options are data read out of the input image, never code. Refuse
+# anything that could break out of the split below before evaluating it.
+case "$MKISO_OPTS" in
+  *[\`\$\;\&\|\<\>\(\)\\]*|*$'\n'*)
+    echo "unexpected characters in El Torito options — refusing to repack" >&2
+    exit 1 ;;
+esac
 # eval-split so quoted values in the recorded options parse correctly
 eval "set -- $MKISO_OPTS"
 xorriso -as mkisofs "$@" -o "$OUT" "$TREE" >/dev/null
